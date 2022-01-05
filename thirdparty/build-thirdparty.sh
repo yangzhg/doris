@@ -431,7 +431,7 @@ build_curl() {
     CFLAGS="-fPIC" \
     ./configure --prefix=$TP_INSTALL_DIR --disable-shared --enable-static \
     --without-librtmp --with-ssl=${TP_INSTALL_DIR} --without-libidn2 --disable-ldap --enable-ipv6 \
-    --without-libssh2
+    --without-libssh2 --without-libpsl
     make -j $PARALLEL && make install
 }
 
@@ -929,57 +929,68 @@ build_breakpad() {
     make -j $PARALLEL && make install
 }
 
-build_libunixodbc
-build_openssl
-build_libevent
-build_zlib
-build_lz4
-build_bzip
-build_lzo2
-build_zstd
-build_boost # must before thrift
-build_protobuf
-build_gflags
-build_gtest
-build_glog
-build_rapidjson
-build_snappy
-build_gperftools
-build_curl
-build_re2
-build_thrift
-build_leveldb
-build_brpc
-build_rocksdb
-build_cyrus_sasl
-build_librdkafka
-build_flatbuffers
-build_arrow
-build_s2
-build_bitshuffle
-build_croaringbitmap
-build_fmt
-build_parallel_hashmap
-build_pdqsort
-build_libdivide
-build_orc
-build_cctz
-build_tsan_header
-build_mysql
-build_aws_c_common
-build_aws_s2n
-build_aws_c_cal
-build_aws_c_io
-build_aws_checksums
-build_aws_c_event_stream
-build_aws_sdk
-build_js_and_css
-build_lzma
-build_xml2
-build_gsasl
-build_hdfs3
-build_benchmark
-build_breakpad
+# simdjson
+build_simdjson() {
+    check_if_source_exist $SIMDJSON_SOURCE
+    cd $TP_SOURCE_DIR/$SIMDJSON_SOURCE
+    mkdir -p $BUILD_DIR && cd $BUILD_DIR
+    cmake -G "${GENERATOR}" .. -DCMAKE_INSTALL_PREFIX=$TP_INSTALL_DIR -DCMAKE_PREFIX_PATH=$TP_INSTALL_DIR -DBUILD_SHARED_LIBS=OFF -DSIMDJSON_DEVELOPER_MODE=OFF
+    ${BUILD_SYSTEM} -j $PARALLEL && ${BUILD_SYSTEM} install
+
+}
+
+#build_libunixodbc
+#build_openssl
+#build_libevent
+#build_zlib
+#build_lz4
+#build_bzip
+#build_lzo2
+#build_zstd
+#build_boost # must before thrift
+#build_protobuf
+#build_gflags
+#build_gtest
+#build_glog
+#build_rapidjson
+#build_snappy
+#build_gperftools
+#build_curl
+#build_re2
+#build_thrift
+#build_leveldb
+#build_brpc
+#build_rocksdb
+#build_cyrus_sasl
+#build_librdkafka
+#build_flatbuffers
+#build_arrow
+#build_s2
+#build_bitshuffle
+#build_croaringbitmap
+#build_fmt
+#build_parallel_hashmap
+#build_pdqsort
+#build_libdivide
+#build_orc
+#build_cctz
+#build_tsan_header
+#build_mysql
+#build_aws_c_common
+#build_aws_s2n
+#build_aws_c_cal
+#build_aws_c_io
+#build_aws_checksums
+#build_aws_c_event_stream
+#build_aws_sdk
+#build_js_and_css
+#build_lzma
+#build_xml2
+#build_gsasl
+#build_hdfs3
+#build_benchmark
+#build_breakpad
+build_simdjson
 
 echo "Finished to build all thirdparties"
 

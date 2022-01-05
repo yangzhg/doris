@@ -387,6 +387,13 @@ BREAKPAD_NAME=breakpad-src-38ee0be-with-lss.tar.gz
 BREAKPAD_SOURCE=breakpad-src-38ee0be-with-lss
 BREAKPAD_MD5SUM="fd8c4f6f5cf8b5e03a4c3c39fde83368"
 
+#simdjson
+SIMDJSON_DOWNLOAD="https://github.com/simdjson/simdjson/archive/refs/tags/v1.0.2.tar.gz"
+SIMDJSON_NAME=simdjson-1.0.2.tar.gz
+SIMDJSON_SOURCE=simdjson-1.0.2
+SIMDJSON_MD5SUM="5bb34cca7087a99c450dbdfe406bdc7d"
+
+
 # all thirdparties which need to be downloaded is set in array TP_ARCHIVES
 export TP_ARCHIVES="LIBEVENT
 OPENSSL
@@ -443,5 +450,6 @@ HDFS3
 LIBDIVIDE
 PDQSORT
 BENCHMARK
-BREAKPAD"
+BREAKPAD
+SIMDJSON"
 
