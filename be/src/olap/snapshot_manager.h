@@ -100,7 +100,7 @@ private:
     static std::mutex _mlock;
 
     // snapshot
-    Mutex _snapshot_mutex;
+    std::mutex _snapshot_mutex;
     uint64_t _snapshot_base_id;
 
     // TODO(zxy) used after

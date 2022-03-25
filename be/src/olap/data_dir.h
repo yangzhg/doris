@@ -31,7 +31,6 @@
 #include "olap/olap_common.h"
 #include "olap/rowset/rowset_id_generator.h"
 #include "util/metrics.h"
-#include "util/mutex.h"
 
 namespace doris {
 
@@ -46,15 +45,15 @@ class DataDir {
 public:
     DataDir(const std::string& path, int64_t capacity_bytes = -1,
             TStorageMedium::type storage_medium = TStorageMedium::HDD,
-            const std::string& remote_path = "",
-            TabletManager* tablet_manager = nullptr, TxnManager* txn_manager = nullptr);
+            const std::string& remote_path = "", TabletManager* tablet_manager = nullptr,
+            TxnManager* txn_manager = nullptr);
     ~DataDir();
 
     Status init();
     void stop_bg_worker();
 
     const std::string& path() const { return _path_desc.filepath; }
-    const FilePathDesc& path_desc() const { return _path_desc;}
+    const FilePathDesc& path_desc() const { return _path_desc; }
     size_t path_hash() const { return _path_hash; }
     bool is_used() const { return _is_used; }
     void set_is_used(bool is_used) { _is_used = is_used; }
@@ -133,9 +132,7 @@ public:
 
     void disks_compaction_num_increment(int64_t delta);
 
-    Env* env() {
-        return _env;
-    }
+    Env* env() { return _env; }
 
 private:
     Status _init_cluster_id();

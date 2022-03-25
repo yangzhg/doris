@@ -50,7 +50,6 @@
 #include "olap/olap_common.h"
 #include "olap/olap_define.h"
 #include "util/errno.h"
-#include "util/mutex.h"
 #include "util/string_parser.hpp"
 
 using std::string;
@@ -609,7 +608,7 @@ OLAPStatus move_to_trash(const std::filesystem::path& schema_hash_root,
 
     // 2. generate new file path
     static uint64_t delete_counter = 0; // a global counter to avoid file name duplication.
-    static Mutex lock;                  // lock for delete_counter
+    static std::mutex lock;             // lock for delete_counter
     std::stringstream new_file_dir_stream;
     lock.lock();
     // when file_path points to a schema_path, we need to save tablet info in trash_path,

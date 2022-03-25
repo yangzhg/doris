@@ -146,7 +146,7 @@ private:
 //            .set_min_threads(0)
 //            .set_max_threads(5)
 //            .set_max_queue_size(10)
-//            .set_idle_timeout(MonoDelta::FromMilliseconds(2000))
+//            .set_idle_timeout(2000ms))
 //            .Build(&thread_pool));
 //    thread_pool->Submit(shared_ptr<Runnable>(new Task()));
 //    thread_pool->SubmitFunc(std::bind(&Func, 10));

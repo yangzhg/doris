@@ -75,7 +75,7 @@ const uint32_t TASK_FINISH_MAX_RETRY = 3;
 const uint32_t PUBLISH_VERSION_MAX_RETRY = 3;
 
 std::atomic_ulong TaskWorkerPool::_s_report_version(time(nullptr) * 10000);
-Mutex TaskWorkerPool::_s_task_signatures_lock;
+std::mutex TaskWorkerPool::_s_task_signatures_lock;
 map<TTaskType::type, set<int64_t>> TaskWorkerPool::_s_task_signatures;
 FrontendServiceClientCache TaskWorkerPool::_master_service_client_cache;
 
@@ -264,7 +264,7 @@ void TaskWorkerPool::notify_thread() {
 }
 
 bool TaskWorkerPool::_register_task_info(const TTaskType::type task_type, int64_t signature) {
-    lock_guard<Mutex> task_signatures_lock(_s_task_signatures_lock);
+    lock_guard<std::mutex> task_signatures_lock(_s_task_signatures_lock);
     set<int64_t>& signature_set = _s_task_signatures[task_type];
     return signature_set.insert(signature).second;
 }
@@ -272,7 +272,7 @@ bool TaskWorkerPool::_register_task_info(const TTaskType::type task_type, int64_
 void TaskWorkerPool::_remove_task_info(const TTaskType::type task_type, int64_t signature) {
     size_t queue_size;
     {
-        lock_guard<Mutex> task_signatures_lock(_s_task_signatures_lock);
+        lock_guard<std::mutex> task_signatures_lock(_s_task_signatures_lock);
         set<int64_t>& signature_set = _s_task_signatures[task_type];
         signature_set.erase(signature);
         queue_size = signature_set.size();
@@ -830,7 +830,7 @@ void TaskWorkerPool::_update_tablet_meta_worker_thread_callback() {
                              << " schema_hash=" << tablet_meta_info.schema_hash;
                 continue;
             }
-            WriteLock wrlock(tablet->get_header_lock());
+            std::lock_guard<std::shared_mutex> wrlock(tablet->get_header_lock());
             // update tablet meta
             if (!tablet_meta_info.__isset.meta_type) {
                 tablet->set_partition_id(tablet_meta_info.partition_id);
@@ -1115,7 +1115,7 @@ void TaskWorkerPool::_report_task_worker_thread_callback() {
         // See _random_sleep() comment in _report_disk_state_worker_thread_callback
         _random_sleep(5);
         {
-            lock_guard<Mutex> task_signatures_lock(_s_task_signatures_lock);
+            lock_guard<std::mutex> task_signatures_lock(_s_task_signatures_lock);
             request.__set_tasks(_s_task_signatures);
         }
         _handle_report(request, ReportType::TASK);

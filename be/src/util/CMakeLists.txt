@@ -90,7 +90,6 @@ set(UTIL_FILES
   path_util.cpp
   file_cache.cpp
   monotime.cpp
-  mutex.cpp
   thread.cpp
   threadpool.cpp
   trace.cpp

@@ -32,7 +32,6 @@
 #include "olap/olap_define.h"
 #include "olap/storage_engine.h"
 #include "util/countdown_latch.h"
-#include "util/mutex.h"
 #include "util/thread.h"
 
 namespace doris {
@@ -241,7 +240,7 @@ private:
     static FrontendServiceClientCache _master_service_client_cache;
     static std::atomic_ulong _s_report_version;
 
-    static Mutex _s_task_signatures_lock;
+    static std::mutex _s_task_signatures_lock;
     static std::map<TTaskType::type, std::set<int64_t>> _s_task_signatures;
 
     DISALLOW_COPY_AND_ASSIGN(TaskWorkerPool);

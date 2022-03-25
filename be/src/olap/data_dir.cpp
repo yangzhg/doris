@@ -540,19 +540,20 @@ OLAPStatus DataDir::load() {
     // At startup, we only count these invalid rowset, but do not actually delete it.
     // The actual delete operation is in StorageEngine::_clean_unused_rowset_metas,
     // which is cleaned up uniformly by the background cleanup thread.
-    LOG(INFO) << "finish to load tablets from " << _path_desc.filepath << ", total rowset meta: "
-              << dir_rowset_metas.size() << ", invalid rowset num: " << invalid_rowset_counter;
+    LOG(INFO) << "finish to load tablets from " << _path_desc.filepath
+              << ", total rowset meta: " << dir_rowset_metas.size()
+              << ", invalid rowset num: " << invalid_rowset_counter;
 
     return OLAP_SUCCESS;
 }
 
 void DataDir::add_pending_ids(const std::string& id) {
-    WriteLock wr_lock(_pending_path_mutex);
+    std::lock_guard<std::shared_mutex> wr_lock(_pending_path_mutex);
     _pending_path_ids.insert(id);
 }
 
 void DataDir::remove_pending_ids(const std::string& id) {
-    WriteLock wr_lock(_pending_path_mutex);
+    std::lock_guard<std::shared_mutex> wr_lock(_pending_path_mutex);
     _pending_path_ids.erase(id);
 }
 
@@ -719,7 +720,7 @@ void DataDir::_process_garbage_path(const std::string& path) {
 }
 
 bool DataDir::_check_pending_ids(const std::string& id) {
-    ReadLock rd_lock(_pending_path_mutex);
+    std::shared_lock<std::shared_mutex> rd_lock(_pending_path_mutex);
     return _pending_path_ids.find(id) != _pending_path_ids.end();
 }
 
