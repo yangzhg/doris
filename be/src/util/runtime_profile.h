@@ -21,13 +21,13 @@
 #include <sys/resource.h>
 #include <sys/time.h>
 
+#include <atomic>
 #include <functional>
 #include <iostream>
 #include <mutex>
 #include <thread>
 
 #include "common/logging.h"
-#include "common/object_pool.h"
 #include "gen_cpp/RuntimeProfile_types.h"
 #include "util/binary_cast.hpp"
 #include "util/stopwatch.hpp"
@@ -93,18 +93,14 @@ public:
         Counter(TUnit::type type, int64_t value = 0) : _value(value), _type(type) {}
         virtual ~Counter() {}
 
-        virtual void update(int64_t delta) {
-            //__sync_fetch_and_add(&_value, delta);
-            _value.add(delta);
-        }
+        virtual void update(int64_t delta) { _value += delta; }
 
-        // Use this to update if the counter is a bitmap
         void bit_or(int64_t delta) {
             int64_t old;
             do {
                 old = _value.load();
                 if (LIKELY((old | delta) == old)) return; // Bits already set, avoid atomic.
-            } while (UNLIKELY(!_value.compare_and_swap(old, old | delta)));
+            } while (UNLIKELY(!_value.compare_exchange_weak(old, old | delta)));
         }
 
         virtual void set(int64_t value) { _value.store(value); }
@@ -126,18 +122,13 @@ public:
     private:
         friend class RuntimeProfile;
 
-        AtomicInt64 _value;
+        std::atomic<int64_t> _value;
         TUnit::type _type;
     };
 
-    class AveragedCounter;
-    class ConcurrentTimerCounter;
     class DerivedCounter;
     class EventSequence;
     class HighWaterMarkCounter;
-    class SummaryStatsCounter;
-    class ThreadCounters;
-    class TimeSeriesCounter;
 
     /// A counter that keeps track of the highest value seen (reporting that
     /// as value()) and the current value.
@@ -146,7 +137,7 @@ public:
         HighWaterMarkCounter(TUnit::type unit) : Counter(unit) {}
 
         virtual void add(int64_t delta) {
-            int64_t new_val = current_value_.add(delta);
+            int64_t new_val = current_value_.fetch_add(delta);
             if (delta > 0) {
                 UpdateMax(new_val);
             }
@@ -159,7 +150,7 @@ public:
                 int64_t old_val = current_value_.load();
                 int64_t new_val = old_val + delta;
                 if (UNLIKELY(new_val > max)) return false;
-                if (LIKELY(current_value_.compare_and_swap(old_val, new_val))) {
+                if (LIKELY(current_value_.compare_exchange_weak(old_val, new_val))) {
                     UpdateMax(new_val);
                     return true;
                 }
@@ -181,13 +172,13 @@ public:
                 int64_t old_max = _value.load();
                 int64_t new_max = std::max(old_max, v);
                 if (new_max == old_max) break; // Avoid atomic update.
-                if (LIKELY(_value.compare_and_swap(old_max, new_max))) break;
+                if (LIKELY(_value.compare_exchange_weak(old_max, new_max))) break;
             }
         }
 
         /// The current value of the counter. _value in the super class represents
         /// the high water mark.
-        AtomicInt64 current_value_;
+        std::atomic<int64_t> current_value_;
     };
 
     typedef std::function<int64_t()> DerivedCounterFunction;
@@ -203,25 +194,6 @@ public:
 
     private:
         DerivedCounterFunction _counter_fn;
-    };
-
-    // A set of counters that measure thread info, such as total time, user time, sys time.
-    class ThreadCounters {
-    private:
-        friend class ThreadCounterMeasurement;
-        friend class RuntimeProfile;
-
-        Counter* _total_time; // total wall clock time
-        Counter* _user_time;  // user CPU time
-        Counter* _sys_time;   // system CPU time
-
-        // The number of times a context switch resulted due to a process voluntarily giving
-        // up the processor before its time slice was completed.
-        Counter* _voluntary_context_switches;
-
-        // The number of times a context switch resulted due to a higher priority process
-        // becoming runnable or because the current process exceeded its time slice.
-        Counter* _involuntary_context_switches;
     };
 
     // An EventSequence captures a sequence of events (each added by
@@ -324,10 +296,6 @@ public:
     DerivedCounter* add_derived_counter(const std::string& name, TUnit::type type,
                                         const DerivedCounterFunction& counter_fn,
                                         const std::string& parent_counter_name);
-
-    // Add a set of thread counters prefixed with 'prefix'. Returns a ThreadCounters object
-    // that the caller can update.  The counter is owned by the RuntimeProfile object.
-    ThreadCounters* add_thread_counters(const std::string& prefix);
 
     // Gets the counter object with 'name'.  Returns nullptr if there is no counter with
     // that name.
