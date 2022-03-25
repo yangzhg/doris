@@ -19,6 +19,7 @@
 #define DORIS_BE_SRC_UTIL_MUTEX_H
 #include <mutex>
 #include <shared_mutex>
+
 #include "olap/olap_define.h"
 
 namespace doris {
@@ -47,8 +48,6 @@ public:
     pthread_mutex_t* getlock() { return &_lock; }
 
 private:
-    friend class ConditionVariable;
-
     pthread_mutex_t _lock;
     DISALLOW_COPY_AND_ASSIGN(Mutex);
 };

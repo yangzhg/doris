@@ -91,7 +91,6 @@ set(UTIL_FILES
   file_cache.cpp
   monotime.cpp
   mutex.cpp
-  condition_variable.cpp
   thread.cpp
   threadpool.cpp
   trace.cpp

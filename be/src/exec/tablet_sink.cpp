@@ -1287,7 +1287,7 @@ void OlapTableSink::_send_batch_process(RuntimeState* state) {
             return;
         }
     } while (!_stop_background_threads_latch.wait_for(
-            MonoDelta::FromMilliseconds(config::olap_table_sink_send_interval_ms)));
+            std::chrono::milliseconds(config::olap_table_sink_send_interval_ms)));
 }
 
 } // namespace stream_load

@@ -85,7 +85,6 @@ TaskWorkerPool::TaskWorkerPool(const TaskWorkerType task_worker_type, ExecEnv* e
           _agent_utils(new AgentUtils()),
           _master_client(new MasterServerClient(_master_info, &_master_service_client_cache)),
           _env(env),
-          _worker_thread_condition_variable(&_worker_thread_lock),
           _stop_background_threads_latch(1),
           _is_work(false),
           _thread_model(thread_model),
@@ -104,7 +103,7 @@ TaskWorkerPool::TaskWorkerPool(const TaskWorkerType task_worker_type, ExecEnv* e
         if (_thread_model == ThreadModel::SINGLE_THREAD) {
             return _is_doing_work.load();
         } else {
-            lock_guard<Mutex> lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> lock(_worker_thread_lock);
             return _tasks.size();
         }
     });
@@ -227,7 +226,7 @@ void TaskWorkerPool::start() {
 
 void TaskWorkerPool::stop() {
     {
-        lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+        std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
         _is_work = false;
         _worker_thread_condition_variable.notify_all();
     }
@@ -247,7 +246,7 @@ void TaskWorkerPool::submit_task(const TAgentTaskRequest& task) {
         (const_cast<TAgentTaskRequest&>(task)).__set_recv_time(time(nullptr));
         size_t task_count_in_queue = 0;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             _tasks.push_back(task);
             task_count_in_queue = _tasks.size();
             _worker_thread_condition_variable.notify_one();
@@ -340,9 +339,9 @@ void TaskWorkerPool::_create_tablet_worker_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TCreateTabletReq create_tablet_req;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -415,9 +414,9 @@ void TaskWorkerPool::_drop_tablet_worker_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TDropTabletReq drop_tablet_req;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -468,9 +467,9 @@ void TaskWorkerPool::_alter_tablet_worker_thread_callback() {
     while (_is_work) {
         TAgentTaskRequest agent_task_req;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -593,7 +592,7 @@ void TaskWorkerPool::_push_worker_thread_callback() {
     int32_t push_worker_count_high_priority = config::push_worker_count_high_priority;
     static uint32_t s_worker_count = 0;
     {
-        lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+        std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
         if (s_worker_count < push_worker_count_high_priority) {
             ++s_worker_count;
             priority = TPriority::HIGH;
@@ -606,9 +605,9 @@ void TaskWorkerPool::_push_worker_thread_callback() {
         TPushReq push_req;
         int32_t index = 0;
         do {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -682,9 +681,9 @@ void TaskWorkerPool::_publish_version_worker_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TPublishVersionRequest publish_version_req;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -746,9 +745,9 @@ void TaskWorkerPool::_clear_transaction_task_worker_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TClearTransactionTaskRequest clear_transaction_task_req;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -804,9 +803,9 @@ void TaskWorkerPool::_update_tablet_meta_worker_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TUpdateTabletMetaInfoReq update_tablet_meta_req;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -872,9 +871,9 @@ void TaskWorkerPool::_clone_worker_thread_callback() {
         TCloneReq clone_req;
 
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -925,9 +924,9 @@ void TaskWorkerPool::_storage_medium_migrate_worker_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TStorageMediumMigrateReq storage_medium_migrate_req;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -1042,9 +1041,9 @@ void TaskWorkerPool::_check_consistency_worker_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TCheckConsistencyReq check_consistency_req;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -1097,8 +1096,9 @@ void TaskWorkerPool::_report_task_worker_thread_callback() {
     while (_is_work) {
         _is_doing_work = false;
         // wait at most report_task_interval_seconds, or being notified
+        std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
         _worker_thread_condition_variable.wait_for(
-                MonoDelta::FromSeconds(config::report_task_interval_seconds));
+                worker_thread_lock, std::chrono::seconds(config::report_task_interval_seconds));
         if (!_is_work) {
             break;
         }
@@ -1133,8 +1133,10 @@ void TaskWorkerPool::_report_disk_state_worker_thread_callback() {
     while (_is_work) {
         _is_doing_work = false;
         // wait at most report_disk_state_interval_seconds, or being notified
+        std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
         _worker_thread_condition_variable.wait_for(
-                MonoDelta::FromSeconds(config::report_disk_state_interval_seconds));
+                worker_thread_lock,
+                std::chrono::seconds(config::report_disk_state_interval_seconds));
         if (!_is_work) {
             break;
         }
@@ -1179,13 +1181,13 @@ void TaskWorkerPool::_report_tablet_worker_thread_callback() {
     TReportRequest request;
     request.__set_backend(_backend);
     request.__isset.tablets = true;
-
     while (_is_work) {
         _is_doing_work = false;
 
         // wait at most report_tablet_interval_seconds, or being notified
+        std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
         _worker_thread_condition_variable.wait_for(
-                MonoDelta::FromSeconds(config::report_tablet_interval_seconds));
+                worker_thread_lock, std::chrono::seconds(config::report_tablet_interval_seconds));
         if (!_is_work) {
             break;
         }
@@ -1235,9 +1237,9 @@ void TaskWorkerPool::_upload_worker_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TUploadReq upload_request;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -1297,9 +1299,9 @@ void TaskWorkerPool::_download_worker_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TDownloadReq download_request;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -1361,9 +1363,9 @@ void TaskWorkerPool::_make_snapshot_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TSnapshotRequest snapshot_request;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -1440,9 +1442,9 @@ void TaskWorkerPool::_release_snapshot_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TReleaseSnapshotRequest release_snapshot_request;
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -1486,9 +1488,8 @@ void TaskWorkerPool::_release_snapshot_thread_callback() {
     }
 }
 
-Status TaskWorkerPool::_get_tablet_info(const TTabletId tablet_id,
-                                             const TSchemaHash schema_hash, int64_t signature,
-                                             TTabletInfo* tablet_info) {
+Status TaskWorkerPool::_get_tablet_info(const TTabletId tablet_id, const TSchemaHash schema_hash,
+                                        int64_t signature, TTabletInfo* tablet_info) {
     Status status = Status::OK();
 
     tablet_info->__set_tablet_id(tablet_id);
@@ -1508,9 +1509,9 @@ void TaskWorkerPool::_move_dir_thread_callback() {
         TAgentTaskRequest agent_task_req;
         TMoveDirReq move_dir_req;
         {
-            MutexLock worker_thread_lock(&(_worker_thread_lock));
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;
@@ -1522,9 +1523,8 @@ void TaskWorkerPool::_move_dir_thread_callback() {
         }
         LOG(INFO) << "get move dir task, signature:" << agent_task_req.signature
                   << ", job id:" << move_dir_req.job_id;
-        Status status =
-                _move_dir(move_dir_req.tablet_id, move_dir_req.schema_hash, move_dir_req.src,
-                          move_dir_req.job_id, true /* TODO */);
+        Status status = _move_dir(move_dir_req.tablet_id, move_dir_req.schema_hash,
+                                  move_dir_req.src, move_dir_req.job_id, true /* TODO */);
 
         if (!status.ok()) {
             LOG(WARNING) << "failed to move dir: " << move_dir_req.src
@@ -1550,7 +1550,7 @@ void TaskWorkerPool::_move_dir_thread_callback() {
 }
 
 Status TaskWorkerPool::_move_dir(const TTabletId tablet_id, const TSchemaHash schema_hash,
-                                      const std::string& src, int64_t job_id, bool overwrite) {
+                                 const std::string& src, int64_t job_id, bool overwrite) {
     TabletSharedPtr tablet =
             StorageEngine::instance()->tablet_manager()->get_tablet(tablet_id, schema_hash);
     if (tablet == nullptr) {
@@ -1631,9 +1631,9 @@ void TaskWorkerPool::_submit_table_compaction_worker_thread_callback() {
         TCompactionReq compaction_req;
 
         {
-            lock_guard<Mutex> worker_thread_lock(_worker_thread_lock);
+            std::unique_lock<std::mutex> worker_thread_lock(_worker_thread_lock);
             while (_is_work && _tasks.empty()) {
-                _worker_thread_condition_variable.wait();
+                _worker_thread_condition_variable.wait(worker_thread_lock);
             }
             if (!_is_work) {
                 return;

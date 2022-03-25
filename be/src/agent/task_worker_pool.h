@@ -31,7 +31,6 @@
 #include "gutil/ref_counted.h"
 #include "olap/olap_define.h"
 #include "olap/storage_engine.h"
-#include "util/condition_variable.h"
 #include "util/countdown_latch.h"
 #include "util/mutex.h"
 #include "util/thread.h"
@@ -73,15 +72,11 @@ public:
         SUBMIT_TABLE_COMPACTION
     };
 
-    enum ReportType {
-        TASK,
-        DISK,
-        TABLET
-    };
+    enum ReportType { TASK, DISK, TABLET };
 
     enum class ThreadModel {
-        SINGLE_THREAD,      // Only 1 thread allowed in the pool
-        MULTI_THREADS       // 1 or more threads allowed in the pool
+        SINGLE_THREAD, // Only 1 thread allowed in the pool
+        MULTI_THREADS  // 1 or more threads allowed in the pool
     };
 
     inline const std::string TYPE_STRING(TaskWorkerType type) {
@@ -203,10 +198,10 @@ private:
     void _handle_report(TReportRequest& request, ReportType type);
 
     Status _get_tablet_info(const TTabletId tablet_id, const TSchemaHash schema_hash,
-                                 int64_t signature, TTabletInfo* tablet_info);
+                            int64_t signature, TTabletInfo* tablet_info);
 
     Status _move_dir(const TTabletId tablet_id, const TSchemaHash schema_hash,
-                          const std::string& src, int64_t job_id, bool overwrite);
+                     const std::string& src, int64_t job_id, bool overwrite);
 
     OLAPStatus _check_migrate_request(const TStorageMediumMigrateReq& req, TabletSharedPtr& tablet,
                                       DataDir** dest_store);
@@ -225,8 +220,8 @@ private:
     ExecEnv* _env;
 
     // Protect task queue
-    Mutex _worker_thread_lock;
-    ConditionVariable _worker_thread_condition_variable;
+    std::mutex _worker_thread_lock;
+    std::condition_variable _worker_thread_condition_variable;
     CountDownLatch _stop_background_threads_latch;
     bool _is_work;
     ThreadModel _thread_model;

@@ -483,7 +483,7 @@ Status ThreadJoiner::join() {
 
         int wait_for = std::min(remaining_before_giveup, remaining_before_next_warn);
 
-        if (_thread->_done.wait_for(MonoDelta::FromMilliseconds(wait_for))) {
+        if (_thread->_done.wait_for(std::chrono::milliseconds(wait_for))) {
             // Unconditionally join before returning, to guarantee that any TLS
             // has been destroyed (pthread_key_create() destructors only run
             // after a pthread's user method has returned).

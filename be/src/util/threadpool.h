@@ -20,6 +20,7 @@
 
 #include <boost/intrusive/list.hpp>
 #include <boost/intrusive/list_hook.hpp>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -29,9 +30,6 @@
 
 #include "common/status.h"
 #include "gutil/ref_counted.h"
-#include "util/condition_variable.h"
-#include "util/monotime.h"
-#include "util/mutex.h"
 
 namespace doris {
 
@@ -99,7 +97,8 @@ public:
     ThreadPoolBuilder& set_min_threads(int min_threads);
     ThreadPoolBuilder& set_max_threads(int max_threads);
     ThreadPoolBuilder& set_max_queue_size(int max_queue_size);
-    ThreadPoolBuilder& set_idle_timeout(const MonoDelta& idle_timeout);
+    template <class Rep, class Period>
+    ThreadPoolBuilder& set_idle_timeout(const std::chrono::duration<Rep, Period>& idle_timeout);
 
     // Instantiate a new ThreadPool with the existing builder arguments.
     Status build(std::unique_ptr<ThreadPool>* pool) const;
@@ -110,9 +109,10 @@ private:
     int _min_threads;
     int _max_threads;
     int _max_queue_size;
-    MonoDelta _idle_timeout;
+    std::chrono::duration<int64_t, std::milli> _idle_timeout;
 
-    DISALLOW_COPY_AND_ASSIGN(ThreadPoolBuilder);
+    ThreadPoolBuilder(const ThreadPoolBuilder&) = delete;
+    void operator=(const ThreadPoolBuilder&) = delete;
 };
 
 // Thread pool with a variable number of threads.
@@ -173,12 +173,24 @@ public:
 
     // Waits for the pool to reach the idle state, or until 'until' time is reached.
     // Returns true if the pool reached the idle state, false otherwise.
-    bool wait_until(const MonoTime& until);
+    template <class Clock, class Duration>
+    bool wait_until(const std::chrono::time_point<Clock, Duration>& until) {
+        std::unique_lock<std::mutex> l(_lock);
+        check_not_pool_thread_unlocked();
+        while (_total_queued_tasks > 0 || _active_threads > 0) {
+            if (_idle_cond.wait_until(until) == std::cv_status::timeout) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     // Waits for the pool to reach the idle state, or until 'delta' time elapses.
     // Returns true if the pool reached the idle state, false otherwise.
-    bool wait_for(const MonoDelta& delta);
-
+    template <class Rep, class Period>
+    bool wait_for(const std::chrono::duration<Rep, Period>& delta) {
+        return wait_until(std::chrono::system_clock::now() + delta);
+    }
     Status set_min_threads(int min_threads);
     Status set_max_threads(int max_threads);
 
@@ -198,32 +210,32 @@ public:
     // Return the number of threads currently running (or in the process of starting up)
     // for this thread pool.
     int num_threads() const {
-        MutexLock l(&_lock);
+        std::lock_guard<std::mutex> l(_lock);
         return _num_threads + _num_threads_pending_start;
     }
 
     int max_threads() const {
-        MutexLock l(&_lock);
+        std::lock_guard<std::mutex> l(_lock);
         return _max_threads;
     }
 
     int min_threads() const {
-        MutexLock l(&_lock);
+        std::lock_guard<std::mutex> l(_lock);
         return _min_threads;
     }
 
     int num_threads_pending_start() const {
-        MutexLock l(&_lock);
+        std::lock_guard<std::mutex> l(_lock);
         return _num_threads_pending_start;
     }
 
     int num_active_threads() const {
-        MutexLock l(&_lock);
+        std::lock_guard<std::mutex> l(_lock);
         return _active_threads;
     }
 
     int get_queue_size() const {
-        MutexLock l(&_lock);
+        std::lock_guard<std::mutex> l(_lock);
         return _total_queued_tasks;
     }
 
@@ -236,7 +248,7 @@ private:
         std::shared_ptr<Runnable> runnable;
 
         // Time at which the entry was submitted to the pool.
-        MonoTime submit_time;
+        std::chrono::time_point<std::chrono::system_clock> submit_time;
     };
 
     // Creates a new thread pool using a builder.
@@ -267,7 +279,7 @@ private:
     int _min_threads;
     int _max_threads;
     const int _max_queue_size;
-    const MonoDelta _idle_timeout;
+    const std::chrono::duration<int64_t, std::milli> _idle_timeout;
 
     // Overall status of the pool. Set to an error when the pool is shut down.
     //
@@ -276,15 +288,15 @@ private:
 
     // Synchronizes many of the members of the pool and all of its
     // condition variables.
-    mutable Mutex _lock;
+    mutable std::mutex _lock;
 
     // Condition variable for "pool is idling". Waiters wake up when
     // _active_threads reaches zero.
-    ConditionVariable _idle_cond;
+    std::condition_variable _idle_cond;
 
     // Condition variable for "pool has no threads". Waiters wake up when
     // _num_threads and num_pending_threads_ are both 0.
-    ConditionVariable _no_threads_cond;
+    std::condition_variable _no_threads_cond;
 
     // Number of threads currently running.
     //
@@ -331,24 +343,24 @@ private:
     // A thread is added to the front of the list when it goes idle and is
     // removed from the front and signaled when new work arrives. This produces a
     // LIFO usage pattern that is more efficient than idling on a single
-    // ConditionVariable (which yields FIFO semantics).
     //
     // Protected by _lock.
     struct IdleThread : public boost::intrusive::list_base_hook<> {
-        explicit IdleThread(Mutex* m) : not_empty(m) {}
+        explicit IdleThread() {}
 
         // Condition variable for "queue is not empty". Waiters wake up when a new
         // task is queued.
-        ConditionVariable not_empty;
-
-        DISALLOW_COPY_AND_ASSIGN(IdleThread);
+        std::condition_variable not_empty;
+        IdleThread(const IdleThread&) = delete;
+        void operator=(const IdleThread&) = delete;
     };
     boost::intrusive::list<IdleThread> _idle_threads; // NOLINT(build/include_what_you_use)
 
     // ExecutionMode::CONCURRENT token used by the pool for tokenless submission.
     std::unique_ptr<ThreadPoolToken> _tokenless;
 
-    DISALLOW_COPY_AND_ASSIGN(ThreadPool);
+    ThreadPool(const ThreadPool&) = delete;
+    void operator=(const ThreadPool&) = delete;
 };
 
 // Entry point for token-based task submission and blocking for a particular
@@ -382,18 +394,31 @@ public:
     // time is reached.
     //
     // Returns true if all submissions are complete, false otherwise.
-    bool wait_until(const MonoTime& until);
+    template <class Clock, class Duration>
+    bool wait_until(const std::chrono::time_point<Clock, Duration>& until) {
+        std::unique_lock<std::mutex> l(_pool->_lock);
+        _pool->check_not_pool_thread_unlocked();
+        while (is_active()) {
+            if (_not_running_cond.wait_until(l, until) == std::cv_status::timeout) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     // Waits for all submissions using this token are complete, or until 'delta'
     // time elapses.
     //
     // Returns true if all submissions are complete, false otherwise.
-    bool wait_for(const MonoDelta& delta);
+    template <class Rep, class Period>
+    bool wait_for(const std::chrono::duration<Rep, Period>& delta) {
+        return wait_until(std::chrono::system_clock::now() + delta);
+    }
 
     bool need_dispatch();
 
     size_t num_tasks() {
-        MutexLock l(&_pool->_lock);
+        std::lock_guard<std::mutex> l(_pool->_lock);
         return _entries.size();
     }
 
@@ -467,7 +492,7 @@ private:
 
     // Condition variable for "token is idle". Waiters wake up when the token
     // transitions to IDLE or QUIESCED.
-    ConditionVariable _not_running_cond;
+    std::condition_variable _not_running_cond;
 
     // Number of worker threads currently executing tasks belonging to this
     // token.
@@ -480,7 +505,8 @@ private:
     // Number of tasks which has not been submitted to the thread pool's queue.
     int _num_unsubmitted_tasks;
 
-    DISALLOW_COPY_AND_ASSIGN(ThreadPoolToken);
+    ThreadPoolToken(const ThreadPoolToken&) = delete;
+    void operator=(const ThreadPoolToken&) = delete;
 };
 
 } // namespace doris

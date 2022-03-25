@@ -28,8 +28,8 @@
 namespace doris {
 
 DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(load_channel_count, MetricUnit::NOUNIT);
-DEFINE_GAUGE_METRIC_PROTOTYPE_5ARG(load_channel_mem_consumption, MetricUnit::BYTES, "", mem_consumption,
-                                   Labels({{"type", "load"}}));
+DEFINE_GAUGE_METRIC_PROTOTYPE_5ARG(load_channel_mem_consumption, MetricUnit::BYTES, "",
+                                   mem_consumption, Labels({{"type", "load"}}));
 
 // Calculate the total memory limit of all load tasks on this BE
 static int64_t calc_process_max_load_memory(int64_t process_mem_limit) {
@@ -87,7 +87,8 @@ Status LoadChannelMgr::init(int64_t process_mem_limit) {
     _mem_tracker = MemTracker::create_tracker(load_mem_limit, "LoadChannelMgr",
                                               MemTracker::get_process_tracker(),
                                               MemTrackerLevel::OVERVIEW);
-    REGISTER_HOOK_METRIC(load_channel_mem_consumption, [this]() { return _mem_tracker->consumption(); });
+    REGISTER_HOOK_METRIC(load_channel_mem_consumption,
+                         [this]() { return _mem_tracker->consumption(); });
     _last_success_channel = new_lru_cache("LastestSuccessChannelCache", 1024);
     RETURN_IF_ERROR(_start_bg_worker());
     return Status::OK();
@@ -238,7 +239,7 @@ Status LoadChannelMgr::_start_bg_worker() {
 #else
                 uint32_t interval = 1;
 #endif
-                while (!_stop_background_threads_latch.wait_for(MonoDelta::FromSeconds(interval))) {
+                while (!_stop_background_threads_latch.wait_for(std::chrono::seconds(interval))) {
                     _start_load_channels_clean();
                 }
             },
