@@ -26,9 +26,7 @@
 #include "runtime/mem_pool.h"
 #include "runtime/mem_tracker.h"
 #include "test_util/test_util.h"
-#include "util/condition_variable.h"
 #include "util/hash_util.hpp"
-#include "util/mutex.h"
 #include "util/priority_thread_pool.hpp"
 #include "util/random.h"
 
@@ -273,7 +271,7 @@ public:
               _mem_pool(new MemPool(_mem_tracker.get())),
               _comparator(new TestComparator()),
               _list(_comparator.get(), _mem_pool.get(), false) {}
-    
+
     // REQUIRES: External synchronization
     void write_step(Random* rnd) {
         const uint32_t k = rnd->Next() % K;
@@ -362,27 +360,25 @@ public:
 
     enum ReaderState { STARTING, RUNNING, DONE };
 
-    explicit TestState(int s) : _seed(s), _quit_flag(false), _state(STARTING), _cv_state(&_mu) {}
+    explicit TestState(int s) : _seed(s), _quit_flag(false), _state(STARTING) {}
 
     void wait(ReaderState s) {
-        _mu.lock();
+        std::unique_lock l(_mu);
         while (_state != s) {
-            _cv_state.wait();
+            _cv_state.wait(l);
         }
-        _mu.unlock();
     }
 
     void change(ReaderState s) {
-        _mu.lock();
+        std::unique_lock l(_mu);
         _state = s;
         _cv_state.notify_one();
-        _mu.unlock();
     }
 
 private:
-    Mutex _mu;
+    std::mutex _mu;
     ReaderState _state;
-    ConditionVariable _cv_state;
+    std::condition_variable _cv_state;
 };
 
 static void concurrent_reader(void* arg) {

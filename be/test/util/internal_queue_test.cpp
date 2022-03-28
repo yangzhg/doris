@@ -158,10 +158,10 @@ const int VALIDATE_INTERVAL = 10000;
 
 // CHECK() is not thread safe so return the result in *failed.
 void ProducerThread(InternalQueue<IntNode>* queue, int num_inserts, std::vector<IntNode>* nodes,
-                    AtomicInt<int32_t>* counter, bool* failed) {
+                    std::atomic<int32_t>* counter, bool* failed) {
     for (int i = 0; i < num_inserts && !*failed; ++i) {
         // Get the next index to queue.
-        AtomicInt<int32_t> value = (*counter)++;
+        std::atomic<int32_t> value = (*counter)++;
         nodes->at(value).value = value;
         queue->enqueue(&nodes->at(value));
         if (i % VALIDATE_INTERVAL == 0) {
@@ -222,7 +222,7 @@ TEST(InternalQueue, TestClear) {
 
 TEST(InternalQueue, TestSingleProducerSingleConsumer) {
     std::vector<IntNode> nodes;
-    AtomicInt<int32_t> counter;
+    std::atomic<int32_t> counter;
     nodes.resize(LOOP_LESS_OR_MORE(100, 1000000));
     std::vector<int> results;
 
@@ -251,7 +251,7 @@ TEST(InternalQueue, TestMultiProducerMultiConsumer) {
 
     bool failed = false;
     for (int num_producers = 1; num_producers < 5; num_producers += 3) {
-        AtomicInt<int32_t> counter;
+        std::atomic<int32_t> counter;
         const int NUM_CONSUMERS = 4;
         ASSERT_EQ(nodes.size() % NUM_CONSUMERS, 0);
         ASSERT_EQ(nodes.size() % num_producers, 0);

@@ -98,8 +98,10 @@ public:
     ThreadPoolBuilder& set_max_threads(int max_threads);
     ThreadPoolBuilder& set_max_queue_size(int max_queue_size);
     template <class Rep, class Period>
-    ThreadPoolBuilder& set_idle_timeout(const std::chrono::duration<Rep, Period>& idle_timeout);
-
+    ThreadPoolBuilder& set_idle_timeout(const std::chrono::duration<Rep, Period>& idle_timeout) {
+        _idle_timeout = idle_timeout;
+        return *this;
+    }
     // Instantiate a new ThreadPool with the existing builder arguments.
     Status build(std::unique_ptr<ThreadPool>* pool) const;
 

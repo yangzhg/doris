@@ -155,7 +155,7 @@ TEST_F(ThreadPoolTest, TestThreadPoolWithNoMinimum) {
     ASSERT_TRUE(rebuild_pool_with_builder(ThreadPoolBuilder(kDefaultPoolName)
                                                   .set_min_threads(0)
                                                   .set_max_threads(3)
-                                                  .set_idle_timeout(MonoDelta::FromMilliseconds(1)))
+                                                  .set_idle_timeout(std::chrono::milliseconds(1)))
                         .ok());
 
     // There are no threads to start with.
@@ -228,7 +228,7 @@ TEST_F(ThreadPoolTest, TestRace) {
     ASSERT_TRUE(rebuild_pool_with_builder(ThreadPoolBuilder(kDefaultPoolName)
                                                   .set_min_threads(0)
                                                   .set_max_threads(1)
-                                                  .set_idle_timeout(MonoDelta::FromMicroseconds(1)))
+                                                  .set_idle_timeout(std::chrono::milliseconds(1)))
                         .ok());
 
     for (int i = 0; i < 500; i++) {
@@ -250,7 +250,7 @@ TEST_F(ThreadPoolTest, TestVariableSizeThreadPool) {
     ASSERT_TRUE(rebuild_pool_with_builder(ThreadPoolBuilder(kDefaultPoolName)
                                                   .set_min_threads(1)
                                                   .set_max_threads(4)
-                                                  .set_idle_timeout(MonoDelta::FromMilliseconds(1)))
+                                                  .set_idle_timeout(std::chrono::milliseconds(1)))
                         .ok());
 
     // There is 1 thread to start with.
@@ -373,8 +373,8 @@ class ThreadPoolTestTokenTypes : public ThreadPoolTest,
                                  public testing::WithParamInterface<ThreadPool::ExecutionMode> {};
 
 INSTANTIATE_TEST_SUITE_P(Tokens, ThreadPoolTestTokenTypes,
-                        ::testing::Values(ThreadPool::ExecutionMode::SERIAL,
-                                          ThreadPool::ExecutionMode::CONCURRENT));
+                         ::testing::Values(ThreadPool::ExecutionMode::SERIAL,
+                                           ThreadPool::ExecutionMode::CONCURRENT));
 
 TEST_P(ThreadPoolTestTokenTypes, TestTokenSubmitAndWait) {
     std::unique_ptr<ThreadPoolToken> t = _pool->new_token(GetParam());
@@ -766,7 +766,7 @@ TEST_F(ThreadPoolTest, TestNormal) {
             .set_min_threads(0)
             .set_max_threads(5)
             .set_max_queue_size(10)
-            .set_idle_timeout(MonoDelta::FromMilliseconds(2000))
+            .set_idle_timeout(std::chrono::milliseconds(2000))
             .build(&thread_pool);
 
     std::unique_ptr<ThreadPoolToken> token1 =
@@ -819,7 +819,7 @@ TEST_F(ThreadPoolTest, TestThreadPoolDynamicAdjustMaximumMinimum) {
     ASSERT_TRUE(rebuild_pool_with_builder(ThreadPoolBuilder(kDefaultPoolName)
                                                   .set_min_threads(3)
                                                   .set_max_threads(3)
-                                                  .set_idle_timeout(MonoDelta::FromMilliseconds(1)))
+                                                  .set_idle_timeout(std::chrono::milliseconds(1)))
                         .ok());
 
     ASSERT_EQ(3, _pool->min_threads());

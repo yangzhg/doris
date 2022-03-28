@@ -38,7 +38,7 @@ public:
     // Once all threads have reached the barrier, the barrier is reset
     // to the initial count.
     void wait() {
-        std::lock_guard<std::mutex> l(_mutex);
+        std::unique_lock<std::mutex> l(_mutex);
         if (--_count == 0) {
             _count = _initial_count;
             _cycle_count++;
@@ -48,7 +48,7 @@ public:
 
         int initial_cycle = _cycle_count;
         while (_cycle_count == initial_cycle) {
-            _cond.wait(_mutex);
+            _cond.wait(l);
         }
     }
 

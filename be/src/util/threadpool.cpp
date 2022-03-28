@@ -68,12 +68,6 @@ ThreadPoolBuilder& ThreadPoolBuilder::set_max_queue_size(int max_queue_size) {
     _max_queue_size = max_queue_size;
     return *this;
 }
-template <class Rep, class Period>
-ThreadPoolBuilder& ThreadPoolBuilder::set_idle_timeout(
-        const std::chrono::duration<Rep, Period>& idle_timeout) {
-    _idle_timeout = idle_timeout;
-    return *this;
-}
 
 Status ThreadPoolBuilder::build(std::unique_ptr<ThreadPool>* pool) const {
     pool->reset(new ThreadPool(*this));
