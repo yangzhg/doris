@@ -23,6 +23,12 @@ include "PaloInternalService.thrift"
 include "Types.thrift"
 include "Status.thrift"
 
+enum TRowsetType {
+    UNKNOWN
+    ALPHA_ROWSET
+    BETA_ROWSET
+}
+
 struct TTabletInfo {
     1: required Types.TTabletId tablet_id
     2: required Types.TSchemaHash schema_hash
@@ -38,6 +44,7 @@ struct TTabletInfo {
     12: optional bool used
     13: optional Types.TPartitionId partition_id
     14: optional bool is_in_memory
+    15: optional TRowsetType rowset_type = TRowsetType.UNKNOWN
 }
 
 struct TFinishTaskRequest {
