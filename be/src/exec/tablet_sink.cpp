@@ -49,7 +49,7 @@ namespace stream_load {
 
 NodeChannel::NodeChannel(OlapTableSink* parent, IndexChannel* index_channel, int64_t node_id)
         : _parent(parent), _index_channel(index_channel), _node_id(node_id) {
-    if (_parent->_transfer_data_by_brpc_attachment) {
+    if (_parent->_transfer_data_by_brpc_stream) {
         _tuple_data_buffer_ptr = &_tuple_data_buffer;
     }
     _node_channel_tracker =
@@ -515,7 +515,7 @@ void NodeChannel::try_send_batch(RuntimeState* state) {
         CHECK(_pending_batches_num == 0) << _pending_batches_num;
     }
 
-    if (_parent->_transfer_data_by_brpc_attachment && request.has_row_batch()) {
+    if (_parent->_transfer_data_by_brpc_stream && request.has_row_batch()) {
         request_row_batch_transfer_attachment<PTabletWriterAddBatchRequest,
                                               ReusableClosure<PTabletWriterAddBatchResult>>(
                 &request, _tuple_data_buffer, _add_batch_closure);
@@ -648,7 +648,8 @@ OlapTableSink::OlapTableSink(ObjectPool* pool, const RowDescriptor& row_desc,
     } else {
         *status = Status::OK();
     }
-    _transfer_data_by_brpc_attachment = config::transfer_data_by_brpc_attachment;
+    // TODO wait for tabletsink support transfer by stream
+    // _transfer_data_by_brpc_stream = config::transfer_data_by_brpc_stream;
 }
 
 OlapTableSink::~OlapTableSink() {

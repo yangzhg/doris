@@ -30,6 +30,8 @@ namespace doris {
 
 class ExecEnv;
 
+class TransmitReceiver;
+
 class PInternalServiceImpl : public PBackendService {
 public:
     PInternalServiceImpl(ExecEnv* exec_env);
@@ -39,6 +41,11 @@ public:
                        const ::doris::PTransmitDataParams* request,
                        ::doris::PTransmitDataResult* response,
                        ::google::protobuf::Closure* done) override;
+
+    void transmit_data_stream(::google::protobuf::RpcController* controller,
+                              const ::doris::PTransmitDataParams* request,
+                              ::doris::PTransmitDataResult* response,
+                              ::google::protobuf::Closure* done) override;
 
     void exec_plan_fragment(google::protobuf::RpcController* controller,
                             const PExecPlanFragmentRequest* request,
@@ -100,6 +107,11 @@ public:
                         ::doris::PTransmitDataResult* response,
                         ::google::protobuf::Closure* done) override;
 
+    void transmit_block_stream(::google::protobuf::RpcController* controller,
+                               const ::doris::PTransmitDataParams* request,
+                               ::doris::PTransmitDataResult* response,
+                               ::google::protobuf::Closure* done) override;
+
     void send_data(google::protobuf::RpcController* controller, const PSendDataRequest* request,
                    PSendDataResult* response, google::protobuf::Closure* done) override;
     void commit(google::protobuf::RpcController* controller, const PCommitRequest* request,
@@ -128,6 +140,7 @@ private:
 private:
     ExecEnv* _exec_env;
     PriorityThreadPool _tablet_worker_pool;
+    TransmitReceiver* _transmit_receiver;
 };
 
 } // namespace doris

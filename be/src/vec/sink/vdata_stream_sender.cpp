@@ -29,6 +29,7 @@
 #include "runtime/runtime_state.h"
 #include "runtime/thread_context.h"
 #include "util/proto_util.h"
+#include "util/defer_op.h"
 #include "vec/common/sip_hash.h"
 #include "vec/runtime/vdata_stream_mgr.h"
 #include "vec/runtime/vdata_stream_recvr.h"
@@ -137,14 +138,57 @@ Status VDataStreamSender::Channel::send_block(PBlock* block, bool eos) {
 
     _closure->ref();
     _closure->cntl.set_timeout_ms(_brpc_timeout_ms);
+    if (config::transfer_data_by_brpc_stream && _parent->_column_values_buffer.size() > 0) {
+        brpc::StreamId sd = brpc::INVALID_STREAM_ID;
+        if (brpc::StreamCreate(&sd, _closure->cntl, nullptr) != 0) {
+            LOG(ERROR) << "Fail to create stream";
+            return Status::InternalError("Fail to create stream");
+        }
+        Defer close_sd {[&sd]() {
+            if (sd != brpc::INVALID_STREAM_ID) {
+                brpc::StreamClose(sd);
+            }
+        }};
+        if (_brpc_request.has_block()) {
+            _brpc_request.mutable_block()->set_column_values("");
+        }
+        _brpc_stub->transmit_block_stream(&_closure->cntl, &_brpc_request, &_closure->result,
+                                          _closure);
 
-    if (_brpc_request.has_block()) {
-        request_block_transfer_attachment<PTransmitDataParams,
-                                          RefCountClosure<PTransmitDataResult>>(
-                &_brpc_request, _parent->_column_values_buffer, _closure);
+        constexpr size_t buffer_size = 100 * 1024 * 1024;
+        size_t cur_pos = 0;
+        butil::IOBuf payload;
+        payload.reserve(buffer_size);
+        while (cur_pos < _parent->_column_values_buffer.size()) {
+            payload.clear();
+            payload.append(_parent->_column_values_buffer.data() + cur_pos,
+                           std::min(_parent->_column_values_buffer.size() - cur_pos, buffer_size));
+            int ret = brpc::StreamWrite(sd, payload);
+            if (ret != 0) {
+                RETURN_NOT_OK_STATUS_WITH_WARN(
+                        Status::InternalError(fmt::format(
+                                "Fail to write to stream, stream id: {} , return: {}[{}]", sd,
+                                std::strerror(ret), ret)),
+                        "StreamWrite failed");
+            }
+            ret = brpc::StreamWait(sd, nullptr);
+            if (ret != 0) {
+                RETURN_NOT_OK_STATUS_WITH_WARN(
+                        Status::InternalError(fmt::format(
+                                "Fail to wait stream write, stream id: {} , return: {}[{}]", sd,
+                                std::strerror(ret), ret)),
+                        "StreamWait failed");
+            }
+        }
+    } else {
+        if (_brpc_request.has_block()) {
+            request_block_transfer_attachment<PTransmitDataParams,
+                                              RefCountClosure<PTransmitDataResult>>(
+                    &_brpc_request, _parent->_column_values_buffer, _closure);
+        }
+
+        _brpc_stub->transmit_block(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
     }
-
-    _brpc_stub->transmit_block(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
     if (block != nullptr) {
         _brpc_request.release_block();
     }

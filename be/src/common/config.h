@@ -551,9 +551,6 @@ CONF_String(default_rowset_type, "BETA");
 CONF_Int64(brpc_max_body_size, "3147483648");
 // Max unwritten bytes in each socket, if the limit is reached, Socket.Write fails with EOVERCROWDED
 CONF_Int64(brpc_socket_max_unwritten_bytes, "1073741824");
-// Whether to transfer RowBatch in ProtoBuf Request to Controller Attachment and send it
-// through brpc, this will be faster and avoid the error of Request length overflow.
-CONF_mBool(transfer_data_by_brpc_attachment, "false");
 
 // max number of txns for every txn_partition_map in txn manager
 // this is a self protection to avoid too many txns saving in manager
@@ -737,6 +734,9 @@ CONF_Validator(string_type_length_soft_limit_bytes,
 // used for olap scanner to save memory, when the size of unused_object_pool
 // is greater than object_pool_buffer_size, release the object in the unused_object_pool.
 CONF_Int32(object_pool_buffer_size, "100");
+
+// transfer data by brpc stream rpc protocol, because of BAIDU_STD protocol cannot suport data large than 2GB
+CONF_mBool(transfer_data_by_brpc_stream, "false");
 } // namespace config
 
 } // namespace doris

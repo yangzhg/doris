@@ -309,11 +309,13 @@ Status RowBatch::serialize(PRowBatch* output_batch, size_t* uncompressed_size,
         *compressed_size = pb_size;
         if (pb_size > std::numeric_limits<int32_t>::max()) {
             // the protobuf has a hard limit of 2GB for serialized data.
-            return Status::InternalError(
-                    fmt::format("The rowbatch is large than 2GB({}), can not send by Protobuf. "
-                                "please set BE config 'transfer_data_by_brpc_attachment' to true "
-                                "and restart BE.",
-                                pb_size));
+            RETURN_NOT_OK_STATUS_WITH_WARN(
+                    Status::InternalError(fmt::format(
+                            "The rowbatch is large than 2GB({}), can not send by Protobuf. "
+                            "please set BE config 'transfer_data_by_brpc_stream' to true "
+                            "and restart BE.",
+                            pb_size)),
+                    "send rowbatch error");
         }
     } else {
         *uncompressed_size = pb_size + tuple_byte_size;

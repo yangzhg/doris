@@ -149,12 +149,58 @@ Status DataStreamSender::Channel::send_batch(PRowBatch* batch, bool eos) {
     _closure->ref();
     _closure->cntl.set_timeout_ms(_brpc_timeout_ms);
 
-    if (_parent->_transfer_data_by_brpc_attachment && _brpc_request.has_row_batch()) {
-        request_row_batch_transfer_attachment<PTransmitDataParams,
-                                              RefCountClosure<PTransmitDataResult>>(
-                &_brpc_request, _parent->_tuple_data_buffer, _closure);
+    if (_parent->_transfer_data_by_brpc_stream && _parent->_tuple_data_buffer.size() > 0) {
+        brpc::StreamId sd = brpc::INVALID_STREAM_ID;
+        if (brpc::StreamCreate(&sd, _closure->cntl, nullptr) != 0) {
+            LOG(ERROR) << "Fail to create stream";
+            return Status::InternalError("Fail to create stream");
+        }
+        Defer close_sd {[&sd]() {
+            if (sd != brpc::INVALID_STREAM_ID) {
+                brpc::StreamClose(sd);
+            }
+        }};
+        LOG(INFO) << "================_parent->_tuple_data_buffer: "
+                  << _parent->_tuple_data_buffer.size();
+        if (_brpc_request.has_row_batch()) {
+            _brpc_request.mutable_row_batch()->set_tuple_data("");
+            LOG(INFO) << "================ _brpc_request.row_batch().tuple_data().size(): "
+                      << _brpc_request.row_batch().tuple_data().size();
+        }
+
+        _brpc_stub->transmit_data_stream(&_closure->cntl, &_brpc_request, &_closure->result,
+                                         _closure);
+
+        constexpr size_t buffer_size = 100 * 1024 * 1024;
+        size_t cur_pos = 0;
+        butil::IOBuf payload;
+        do {
+            payload.clear();
+            payload.append(_parent->_tuple_data_buffer.data() + cur_pos,
+                           std::min(_parent->_tuple_data_buffer.size() - cur_pos, buffer_size));
+            int ret = brpc::StreamWrite(sd, payload);
+            LOG(INFO) << "================sending:" << payload.size();
+            if (ret != 0) {
+                RETURN_NOT_OK_STATUS_WITH_WARN(
+                        Status::InternalError(fmt::format(
+                                "Fail to write to stream, stream id: {} , return: {}[{}]", sd,
+                                std::strerror(ret), ret)),
+                        "StreamWrite failed");
+            }
+            ret = brpc::StreamWait(sd, nullptr);
+            if (ret != 0) {
+                RETURN_NOT_OK_STATUS_WITH_WARN(
+                        Status::InternalError(fmt::format(
+                                "Fail to wait stream write, stream id: {} , return: {}[{}]", sd,
+                                std::strerror(ret), ret)),
+                        "StreamWait failed");
+            }
+            cur_pos += payload.size();
+        } while (cur_pos < _parent->_tuple_data_buffer.size());
+    } else {
+        _brpc_stub->transmit_data(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
+        LOG(INFO) << "================sending by baidu_std:";
     }
-    _brpc_stub->transmit_data(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
     if (batch != nullptr) {
         _brpc_request.release_row_batch();
     }
@@ -275,8 +321,8 @@ DataStreamSender::DataStreamSender(ObjectPool* pool, int sender_id, const RowDes
           _serialize_batch_timer(nullptr),
           _bytes_sent_counter(nullptr),
           _local_bytes_send_counter(nullptr),
-          _transfer_data_by_brpc_attachment(config::transfer_data_by_brpc_attachment) {
-    if (_transfer_data_by_brpc_attachment) {
+          _transfer_data_by_brpc_stream(config::transfer_data_by_brpc_stream) {
+    if (_transfer_data_by_brpc_stream) {
         _tuple_data_buffer_ptr = &_tuple_data_buffer;
     }
 }
@@ -298,8 +344,8 @@ DataStreamSender::DataStreamSender(ObjectPool* pool, int sender_id, const RowDes
           _part_type(sink.output_partition.type),
           _ignore_not_found(sink.__isset.ignore_not_found ? sink.ignore_not_found : true),
           _dest_node_id(sink.dest_node_id),
-          _transfer_data_by_brpc_attachment(config::transfer_data_by_brpc_attachment) {
-    if (_transfer_data_by_brpc_attachment) {
+          _transfer_data_by_brpc_stream(config::transfer_data_by_brpc_stream) {
+    if (_transfer_data_by_brpc_stream) {
         _tuple_data_buffer_ptr = &_tuple_data_buffer;
     }
 

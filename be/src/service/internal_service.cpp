@@ -17,6 +17,9 @@
 
 #include "service/internal_service.h"
 
+#include <parallel_hashmap/phmap.h>
+#include <brpc/stream.h>
+
 #include "common/config.h"
 #include "gen_cpp/BackendService.h"
 #include "gen_cpp/internal_service.pb.h"
@@ -41,6 +44,74 @@
 
 namespace doris {
 
+class TransmitReceiver : public brpc::StreamInputHandler {
+public:
+    TransmitReceiver() { LOG(INFO) << "================ TransmitReceiver"; }
+    ~TransmitReceiver() {
+        LOG(INFO) << "================ ~TransmitReceiver";
+        for (auto [key, value] : _id_map) {
+            auto done = std::get<2>(value);
+            done();
+        }
+    }
+    virtual int on_received_messages(brpc::StreamId id, butil::IOBuf* const messages[],
+                                     size_t size) {
+        if (UNLIKELY(_id_map.find(id) == _id_map.end())) {
+            LOG(WARNING) << "StreamId not found: " << id;
+            return -1;
+        }
+        for (size_t i = 0; i < size; ++i) {
+            auto append = std::get<0>(_id_map[id]);
+            LOG(INFO) << "================received:" << messages[i]->size();
+            append(messages[i]);
+        }
+        return 0;
+    }
+    virtual void on_idle_timeout(brpc::StreamId id) {
+        if (UNLIKELY(_id_map.find(id) == _id_map.end())) {
+            LOG(WARNING) << "StreamId not found: " << id;
+            return;
+        }
+        auto done = std::get<2>(_id_map[id]);
+        done();
+        _id_map.erase(id);
+        if (id != brpc::INVALID_STREAM_ID) {
+            brpc::StreamClose(id);
+        }
+    }
+    virtual void on_closed(brpc::StreamId id) {
+        if (UNLIKELY(_id_map.find(id) == _id_map.end())) {
+            LOG(WARNING) << "StreamId not found: " << id;
+            return;
+        }
+        auto close = std::get<1>(_id_map[id]);
+        close();
+
+        auto done = std::get<2>(_id_map[id]);
+        done();
+        _id_map.erase(id);
+        if (id != brpc::INVALID_STREAM_ID) {
+            brpc::StreamClose(id);
+        }
+    }
+
+    Status add_stream(brpc::StreamId id, std::function<void(butil::IOBuf*)> append,
+                      std::function<void()> close, std::function<void()> done) {
+        if (LIKELY(_id_map.try_emplace(id, std::move(append), std::move(close), std::move(done))
+                           .second)) {
+            return Status::OK();
+        } else {
+            return Status::AlreadyExist(fmt::format("stream id: {} is already exist.", id));
+        }
+    }
+
+private:
+    phmap::parallel_flat_hash_map<brpc::StreamId,
+                                  std::tuple<std::function<void(butil::IOBuf*)>,
+                                             std::function<void()>, std::function<void()>>>
+            _id_map;
+};
+
 DEFINE_GAUGE_METRIC_PROTOTYPE_2ARG(add_batch_task_queue_size, MetricUnit::NOUNIT);
 
 bthread_key_t btls_key;
@@ -50,7 +121,9 @@ static void thread_context_deleter(void* d) {
 }
 
 PInternalServiceImpl::PInternalServiceImpl(ExecEnv* exec_env)
-        : _exec_env(exec_env), _tablet_worker_pool(config::number_tablet_writer_threads, 10240) {
+        : _exec_env(exec_env),
+          _tablet_worker_pool(config::number_tablet_writer_threads, 10240),
+          _transmit_receiver(new TransmitReceiver()) {
     REGISTER_HOOK_METRIC(add_batch_task_queue_size,
                          [this]() { return _tablet_worker_pool.get_queue_size(); });
     CHECK_EQ(0, bthread_key_create(&btls_key, thread_context_deleter));
@@ -59,6 +132,7 @@ PInternalServiceImpl::PInternalServiceImpl(ExecEnv* exec_env)
 PInternalServiceImpl::~PInternalServiceImpl() {
     DEREGISTER_HOOK_METRIC(add_batch_task_queue_size);
     CHECK_EQ(0, bthread_key_delete(btls_key));
+    delete _transmit_receiver;
 }
 
 void PInternalServiceImpl::transmit_data(google::protobuf::RpcController* cntl_base,
@@ -68,8 +142,6 @@ void PInternalServiceImpl::transmit_data(google::protobuf::RpcController* cntl_b
     SCOPED_SWITCH_BTHREAD();
     VLOG_ROW << "transmit data: fragment_instance_id=" << print_id(request->finst_id())
              << " node=" << request->node_id();
-    brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
-    attachment_transfer_request_row_batch<PTransmitDataParams>(request, cntl);
     // The response is accessed when done->Run is called in transmit_data(),
     // give response a default value to avoid null pointers in high concurrency.
     Status st;
@@ -84,6 +156,46 @@ void PInternalServiceImpl::transmit_data(google::protobuf::RpcController* cntl_b
         st.to_protobuf(response->mutable_status());
         done->Run();
     }
+}
+
+void PInternalServiceImpl::transmit_data_stream(google::protobuf::RpcController* cntl_base,
+                                                const PTransmitDataParams* request,
+                                                PTransmitDataResult* response,
+                                                google::protobuf::Closure* done) {
+    SCOPED_SWITCH_BTHREAD();
+    VLOG_ROW << "transmit data: fragment_instance_id=" << print_id(request->finst_id())
+             << " node=" << request->node_id();
+    brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
+    brpc::StreamOptions stream_options;
+    stream_options.handler = _transmit_receiver;
+    brpc::StreamId sd = brpc::INVALID_STREAM_ID;
+    if (brpc::StreamAccept(&sd, *cntl, &stream_options) != 0) {
+        cntl->SetFailed("Fail to accept stream");
+        LOG(INFO) << "Fail to accept stream";
+        Status st = Status::InternalError("Fail to accept stream");
+        st.to_protobuf(response->mutable_status());
+        done->Run();
+        if (sd != brpc::INVALID_STREAM_ID) {
+            brpc::StreamClose(sd);
+        }
+        return;
+    }
+    _transmit_receiver->add_stream(
+            sd,
+            [&request, &done](butil::IOBuf* msg) {
+                auto rb = const_cast<PTransmitDataParams*>(request)->mutable_row_batch();
+                msg->append_to(rb->mutable_tuple_data(), msg->size());
+            },
+            [&request, &done, this]() {
+                WARN_IF_ERROR(_exec_env->stream_mgr()->transmit_data(request, &done),
+                              "transmit_data_stream failed");
+            },
+            [&done]() {
+                if (done != nullptr) {
+                    done->Run();
+                }
+            });
+    Status::OK().to_protobuf(response->mutable_status());
 }
 
 void PInternalServiceImpl::tablet_writer_open(google::protobuf::RpcController* controller,
@@ -459,8 +571,6 @@ void PInternalServiceImpl::transmit_block(google::protobuf::RpcController* cntl_
     SCOPED_SWITCH_BTHREAD();
     VLOG_ROW << "transmit data: fragment_instance_id=" << print_id(request->finst_id())
              << " node=" << request->node_id();
-    brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
-    attachment_transfer_request_block<PTransmitDataParams>(request, cntl);
     // The response is accessed when done->Run is called in transmit_block(),
     // give response a default value to avoid null pointers in high concurrency.
     Status st;
@@ -475,6 +585,48 @@ void PInternalServiceImpl::transmit_block(google::protobuf::RpcController* cntl_
         st.to_protobuf(response->mutable_status());
         done->Run();
     }
+}
+
+void PInternalServiceImpl::transmit_block_stream(google::protobuf::RpcController* cntl_base,
+                                                 const PTransmitDataParams* request,
+                                                 PTransmitDataResult* response,
+                                                 google::protobuf::Closure* done) {
+    SCOPED_SWITCH_BTHREAD();
+    VLOG_ROW << "transmit data: fragment_instance_id=" << print_id(request->finst_id())
+             << " node=" << request->node_id();
+    brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
+    brpc::StreamOptions stream_options;
+    stream_options.handler = _transmit_receiver;
+    brpc::StreamId sd = brpc::INVALID_STREAM_ID;
+
+    if (brpc::StreamAccept(&sd, *cntl, &stream_options) != 0) {
+        cntl->SetFailed("Fail to accept stream");
+        LOG(INFO) << "Fail to accept stream";
+        Status st = Status::InternalError("Fail to accept stream");
+        st.to_protobuf(response->mutable_status());
+        done->Run();
+        if (sd != brpc::INVALID_STREAM_ID) {
+            brpc::StreamClose(sd);
+        }
+        return;
+    }
+
+    _transmit_receiver->add_stream(
+            sd,
+            [&request, &done](butil::IOBuf* msg) {
+                auto block = const_cast<PTransmitDataParams*>(request)->mutable_block();
+                msg->append_to(block->mutable_column_values(), msg->size());
+            },
+            [&request, &done, this]() {
+                WARN_IF_ERROR(_exec_env->vstream_mgr()->transmit_block(request, &done),
+                              "transmit_block_stream failed");
+            },
+            [&done]() {
+                if (done != nullptr) {
+                    done->Run();
+                }
+            });
+    Status::OK().to_protobuf(response->mutable_status());
 }
 
 void PInternalServiceImpl::check_rpc_channel(google::protobuf::RpcController* controller,
