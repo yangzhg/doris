@@ -155,21 +155,20 @@ Status DataStreamSender::Channel::send_batch(PRowBatch* batch, bool eos) {
             LOG(ERROR) << "Fail to create stream";
             return Status::InternalError("Fail to create stream");
         }
-        Defer close_sd {[&sd]() {
+        Defer close_sd {[&sd, this]() {
             if (sd != brpc::INVALID_STREAM_ID) {
                 brpc::StreamClose(sd);
             }
+            brpc::StartCancel(_closure->cntl.call_id());
+            _closure->Run();
         }};
-        LOG(INFO) << "================_parent->_tuple_data_buffer: "
-                  << _parent->_tuple_data_buffer.size();
         if (_brpc_request.has_row_batch()) {
             _brpc_request.mutable_row_batch()->set_tuple_data("");
-            LOG(INFO) << "================ _brpc_request.row_batch().tuple_data().size(): "
-                      << _brpc_request.row_batch().tuple_data().size();
         }
-
-        _brpc_stub->transmit_data_stream(&_closure->cntl, &_brpc_request, &_closure->result,
-                                         _closure);
+        brpc::Controller cntl;
+        PTransmitDataResult response;
+        cntl.set_timeout_ms(_brpc_timeout_ms);
+        _brpc_stub->transmit_data_stream(&cntl, &_brpc_request, &response, NULL);
 
         constexpr size_t buffer_size = 100 * 1024 * 1024;
         size_t cur_pos = 0;
@@ -199,7 +198,6 @@ Status DataStreamSender::Channel::send_batch(PRowBatch* batch, bool eos) {
         } while (cur_pos < _parent->_tuple_data_buffer.size());
     } else {
         _brpc_stub->transmit_data(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
-        LOG(INFO) << "================sending by baidu_std:";
     }
     if (batch != nullptr) {
         _brpc_request.release_row_batch();
