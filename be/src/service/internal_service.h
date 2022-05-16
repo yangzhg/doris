@@ -27,7 +27,7 @@ class Controller;
 }
 
 namespace doris {
-
+class TransmitReceiver;
 class ExecEnv;
 
 class PInternalServiceImpl : public PBackendService {
@@ -128,6 +128,7 @@ private:
 private:
     ExecEnv* _exec_env;
     PriorityThreadPool _tablet_worker_pool;
+    TransmitReceiver* _transmit_receiver;
 };
 
 } // namespace doris

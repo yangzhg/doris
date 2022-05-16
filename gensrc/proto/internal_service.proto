@@ -46,6 +46,7 @@ message PTransmitDataParams {
     optional PBlock block = 9;
     // transfer the RowBatch to the Controller Attachment
     optional bool transfer_by_attachment = 10 [default = false];
+    optional PUniqueId query_id = 11;
 };
 
 message PTransmitDataResult {

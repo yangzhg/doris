@@ -92,6 +92,7 @@ Status ResultSink::send(RuntimeState* state, RowBatch* batch) {
     // 1. Avoid the query being cancelled when the memory limit is reached after the query result comes out.
     // 2. If record this memory, also need to record on the receiving end, need to consider the life cycle of MemTracker.
     SCOPED_STOP_THREAD_LOCAL_MEM_TRACKER();
+    LOG(INFO) << "========batch->total_byte_size() " << batch->total_byte_size();
     return _writer->append_row_batch(batch);
 }
 

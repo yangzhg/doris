@@ -199,8 +199,9 @@ protected:
 
         TNetworkAddress _brpc_dest_addr;
 
-        // TODO(zc): initused for brpc
+        // TODO(zc): init used for brpc
         PUniqueId _finst_id;
+        PUniqueId _query_id;
 
         // serialized batches for broadcasting; we need two so we can write
         // one while the other one is still being sent.
@@ -213,6 +214,7 @@ protected:
         PTransmitDataParams _brpc_request;
         std::shared_ptr<PBackendService_Stub> _brpc_stub = nullptr;
         RefCountClosure<PTransmitDataResult>* _closure = nullptr;
+        RuntimeState* _state;
         int32_t _brpc_timeout_ms = 500;
         // whether the dest can be treated as query statistics transfer chain.
         bool _is_transfer_chain;

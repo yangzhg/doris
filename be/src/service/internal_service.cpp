@@ -17,6 +17,9 @@
 
 #include "service/internal_service.h"
 
+#include <brpc/stream.h>
+#include <parallel_hashmap/phmap.h>
+
 #include "common/config.h"
 #include "gen_cpp/BackendService.h"
 #include "gen_cpp/internal_service.pb.h"
@@ -49,8 +52,91 @@ static void thread_context_deleter(void* d) {
     delete static_cast<ThreadContext*>(d);
 }
 
+template <typename T>
+class ReleaseMemClosure : public ::google::protobuf::Closure {
+public:
+    ReleaseMemClosure(T* data) : _data(data) {}
+    ~ReleaseMemClosure() {}
+
+    void Run() {
+        if (_data != _data) {
+            LOG(INFO) << "=========== delete _data" << static_cast<void*>(_data);
+            delete _data;
+            _data = nullptr;
+        }
+        delete this;
+    }
+
+private:
+    T* _data = nullptr;
+};
+
+class TransmitReceiver : public brpc::StreamInputHandler {
+public:
+    ~TransmitReceiver() {
+        for (auto [key, value] : _id_map) {
+            auto done = std::get<2>(value);
+            done();
+        }
+    }
+    virtual int on_received_messages(brpc::StreamId id, butil::IOBuf* const messages[],
+                                     size_t size) {
+        if (UNLIKELY(_id_map.find(id) == _id_map.end())) {
+            LOG(WARNING) << "StreamId not found: " << id;
+            return -1;
+        }
+        for (size_t i = 0; i < size; ++i) {
+            auto append = std::get<0>(_id_map[id]);
+            append(messages[i]);
+        }
+        return 0;
+    }
+    virtual void on_idle_timeout(brpc::StreamId id) {
+        if (UNLIKELY(_id_map.find(id) == _id_map.end())) {
+            LOG(WARNING) << "StreamId not found: " << id;
+            return;
+        }
+        auto timeout = std::get<2>(_id_map[id]);
+        timeout();
+        _id_map.erase(id);
+        if (id != brpc::INVALID_STREAM_ID) {
+            brpc::StreamClose(id);
+        }
+    }
+    virtual void on_closed(brpc::StreamId id) {
+        if (UNLIKELY(_id_map.find(id) == _id_map.end())) {
+            LOG(WARNING) << "StreamId not found: " << id;
+            return;
+        }
+        auto close = std::get<1>(_id_map[id]);
+        close();
+        _id_map.erase(id);
+        if (id != brpc::INVALID_STREAM_ID) {
+            brpc::StreamClose(id);
+        }
+    }
+
+    Status add_stream(brpc::StreamId id, std::function<void(butil::IOBuf*)> append,
+                      std::function<void()> close, std::function<void()> done) {
+        if (LIKELY(_id_map.try_emplace(id, std::move(append), std::move(close), std::move(done))
+                           .second)) {
+            return Status::OK();
+        } else {
+            return Status::AlreadyExist(fmt::format("stream id: {} is already exist.", id));
+        }
+    }
+
+private:
+    phmap::parallel_flat_hash_map<brpc::StreamId,
+                                  std::tuple<std::function<void(butil::IOBuf*)>,
+                                             std::function<void()>, std::function<void()>>>
+            _id_map;
+};
+
 PInternalServiceImpl::PInternalServiceImpl(ExecEnv* exec_env)
-        : _exec_env(exec_env), _tablet_worker_pool(config::number_tablet_writer_threads, 10240) {
+        : _exec_env(exec_env),
+          _tablet_worker_pool(config::number_tablet_writer_threads, 10240),
+          _transmit_receiver(new TransmitReceiver()) {
     REGISTER_HOOK_METRIC(add_batch_task_queue_size,
                          [this]() { return _tablet_worker_pool.get_queue_size(); });
     CHECK_EQ(0, bthread_key_create(&btls_key, thread_context_deleter));
@@ -59,6 +145,7 @@ PInternalServiceImpl::PInternalServiceImpl(ExecEnv* exec_env)
 PInternalServiceImpl::~PInternalServiceImpl() {
     DEREGISTER_HOOK_METRIC(add_batch_task_queue_size);
     CHECK_EQ(0, bthread_key_delete(btls_key));
+    delete _transmit_receiver;
 }
 
 void PInternalServiceImpl::transmit_data(google::protobuf::RpcController* cntl_base,
@@ -66,19 +153,116 @@ void PInternalServiceImpl::transmit_data(google::protobuf::RpcController* cntl_b
                                          PTransmitDataResult* response,
                                          google::protobuf::Closure* done) {
     SCOPED_SWITCH_BTHREAD();
-    VLOG_ROW << "transmit data: fragment_instance_id=" << print_id(request->finst_id())
-             << " node=" << request->node_id();
+    std::string query_id;
+    TUniqueId finst_id;
+    finst_id.__set_hi(request->finst_id().hi());
+    finst_id.__set_lo(request->finst_id().lo());
+    if (request->has_query_id()) {
+        query_id = print_id(request->query_id());
+        SCOPED_ATTACH_TASK_THREAD(
+                ThreadContext::TaskType::QUERY, query_id, finst_id,
+                _exec_env->task_pool_mem_tracker_registry()->get_task_mem_tracker(query_id));
+    }
+    VLOG_ROW << "transmit data: fragment_instance_id=" << print_id(finst_id)
+             << " query_id=" << query_id << " node=" << request->node_id();
+
     brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
-    attachment_transfer_request_row_batch<PTransmitDataParams>(request, cntl);
-    // The response is accessed when done->Run is called in transmit_data(),
-    // give response a default value to avoid null pointers in high concurrency.
     Status st;
     st.to_protobuf(response->mutable_status());
-    st = _exec_env->stream_mgr()->transmit_data(request, &done);
-    if (!st.ok()) {
-        LOG(WARNING) << "transmit_data failed, message=" << st.get_error_msg()
-                     << ", fragment_instance_id=" << print_id(request->finst_id())
-                     << ", node=" << request->node_id();
+    if (UNLIKELY(cntl->has_remote_stream())) {
+        brpc::StreamOptions stream_options;
+        stream_options.handler = _transmit_receiver;
+        brpc::StreamId sd = brpc::INVALID_STREAM_ID;
+        if (brpc::StreamAccept(&sd, *cntl, &stream_options) != 0) {
+            cntl->SetFailed("Fail to accept stream");
+            LOG(INFO) << "Fail to accept stream";
+            Status st = Status::InternalError("Fail to accept stream");
+            st.to_protobuf(response->mutable_status());
+            done->Run();
+            if (sd != brpc::INVALID_STREAM_ID) {
+                brpc::StreamClose(sd);
+            }
+            return;
+        }
+        auto temp_request = new PTransmitDataParams();
+        temp_request->CopyFrom(*request);
+        google::protobuf::Closure* rmc = new ReleaseMemClosure<PTransmitDataParams>(temp_request);
+        _transmit_receiver->add_stream(
+                sd,
+                // on_received_messages
+                [=, &rmc](butil::IOBuf* msg) {
+                    if (temp_request->has_query_id()) {
+                        SCOPED_ATTACH_TASK_THREAD(
+                                ThreadContext::TaskType::QUERY, query_id, finst_id,
+                                _exec_env->task_pool_mem_tracker_registry()->get_task_mem_tracker(
+                                        query_id));
+                    }
+                    auto rb = temp_request->mutable_row_batch();
+                    try {
+                        msg->append_to(rb->mutable_tuple_data(), msg->size());
+                    } catch (...) {
+                        std::exception_ptr e = std::current_exception();
+                        std::string error_msg = fmt::format(
+                                "Failed to receive data for query id: {} , already received: {}, "
+                                "reason: {}",
+                                query_id, rb->tuple_data().size(),
+                                (e ? e.__cxa_exception_type()->name() : "unknown"));
+                        _exec_env->fragment_mgr()->cancel(
+                                finst_id, doris::PPlanFragmentCancelReason::MEMORY_LIMIT_EXCEED,
+                                error_msg);
+                        if (rmc != nullptr) {
+                            rmc->Run();
+                            rmc = nullptr;
+                        }
+                        LOG(WARNING) << error_msg;
+                    }
+                },
+                // on_close
+                [=, &rmc]() {
+                    if (temp_request->has_query_id()) {
+                        SCOPED_ATTACH_TASK_THREAD(
+                                ThreadContext::TaskType::QUERY, query_id, finst_id,
+                                _exec_env->task_pool_mem_tracker_registry()->get_task_mem_tracker(
+                                        query_id));
+                    }
+                    Md5Digest digest;
+                    digest.update(temp_request->row_batch().tuple_data().c_str(),
+                                  temp_request->row_batch().tuple_data().size());
+                    digest.digest();
+                    LOG(INFO) << "receive large data by stream, payload size "
+                              << temp_request->row_batch().tuple_data().size()
+                              << ", md5: " << digest.hex();
+                    WARN_IF_ERROR(_exec_env->stream_mgr()->transmit_data(temp_request, &rmc),
+                                  "transmit_data by stream failed");
+                    if (rmc != nullptr) {
+                        rmc->Run();
+                        rmc = nullptr;
+                    }
+                },
+                // on_idle_timeout
+                [=, &rmc]() {
+                    if (temp_request->has_query_id()) {
+                        SCOPED_ATTACH_TASK_THREAD(
+                                ThreadContext::TaskType::QUERY, query_id, finst_id,
+                                _exec_env->task_pool_mem_tracker_registry()->get_task_mem_tracker(
+                                        query_id));
+                    }
+                    LOG(WARNING) << "receive message from stream failed: query id is " << query_id;
+                    if (rmc != nullptr) {
+                        rmc->Run();
+                        rmc = nullptr;
+                    }
+                });
+    } else {
+        attachment_transfer_request_row_batch<PTransmitDataParams>(request, cntl);
+        // The response is accessed when done->Run is called in transmit_data(),
+        // give response a default value to avoid null pointers in high concurrency.
+        st = _exec_env->stream_mgr()->transmit_data(request, &done);
+        if (!st.ok()) {
+            LOG(WARNING) << "transmit_data failed, message=" << st.get_error_msg()
+                         << ", fragment_instance_id=" << print_id(request->finst_id())
+                         << ", node=" << request->node_id();
+        }
     }
     if (done != nullptr) {
         st.to_protobuf(response->mutable_status());
@@ -460,19 +644,116 @@ void PInternalServiceImpl::transmit_block(google::protobuf::RpcController* cntl_
                                           PTransmitDataResult* response,
                                           google::protobuf::Closure* done) {
     SCOPED_SWITCH_BTHREAD();
-    VLOG_ROW << "transmit data: fragment_instance_id=" << print_id(request->finst_id())
-             << " node=" << request->node_id();
+    std::string query_id;
+    TUniqueId finst_id;
+    finst_id.__set_hi(request->finst_id().hi());
+    finst_id.__set_lo(request->finst_id().lo());
+    if (request->has_query_id()) {
+        query_id = print_id(request->query_id());
+        SCOPED_ATTACH_TASK_THREAD(
+                ThreadContext::TaskType::QUERY, query_id, finst_id,
+                _exec_env->task_pool_mem_tracker_registry()->get_task_mem_tracker(query_id));
+    }
+    VLOG_ROW << "transmit block: fragment_instance_id=" << print_id(request->finst_id())
+             << " query_id=" << query_id << " node=" << request->node_id();
     brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
-    attachment_transfer_request_block<PTransmitDataParams>(request, cntl);
-    // The response is accessed when done->Run is called in transmit_block(),
-    // give response a default value to avoid null pointers in high concurrency.
+    if (request->has_query_id()) {
+        SCOPED_ATTACH_TASK_THREAD(
+                ThreadContext::TaskType::QUERY, query_id, finst_id,
+                _exec_env->task_pool_mem_tracker_registry()->get_task_mem_tracker(query_id));
+    }
     Status st;
     st.to_protobuf(response->mutable_status());
-    st = _exec_env->vstream_mgr()->transmit_block(request, &done);
-    if (!st.ok()) {
-        LOG(WARNING) << "transmit_block failed, message=" << st.get_error_msg()
-                     << ", fragment_instance_id=" << print_id(request->finst_id())
-                     << ", node=" << request->node_id();
+    if (UNLIKELY(cntl->has_remote_stream())) {
+        brpc::StreamOptions stream_options;
+        stream_options.handler = _transmit_receiver;
+        brpc::StreamId sd = brpc::INVALID_STREAM_ID;
+
+        if (brpc::StreamAccept(&sd, *cntl, &stream_options) != 0) {
+            cntl->SetFailed("Fail to accept stream");
+            LOG(INFO) << "Fail to accept stream";
+            Status st = Status::InternalError("Fail to accept stream");
+            st.to_protobuf(response->mutable_status());
+            done->Run();
+            if (sd != brpc::INVALID_STREAM_ID) {
+                brpc::StreamClose(sd);
+            }
+            return;
+        }
+        auto temp_request = new PTransmitDataParams();
+        temp_request->CopyFrom(*request);
+        google::protobuf::Closure* rmc = new ReleaseMemClosure<PTransmitDataParams>(temp_request);
+        _transmit_receiver->add_stream(
+                sd,
+                [=, &rmc](butil::IOBuf* msg) {
+                    if (temp_request->has_query_id()) {
+                        SCOPED_ATTACH_TASK_THREAD(
+                                ThreadContext::TaskType::QUERY, query_id, finst_id,
+                                _exec_env->task_pool_mem_tracker_registry()->get_task_mem_tracker(
+                                        query_id));
+                    }
+                    auto block = temp_request->mutable_block();
+
+                    try {
+                        msg->append_to(block->mutable_column_values(), msg->size());
+                    } catch (...) {
+                        std::exception_ptr e = std::current_exception();
+                        std::string error_msg = fmt::format(
+                                "Failed to receive data for query id: {} , already received: {}, "
+                                "reason: {}",
+                                query_id, block->column_values().size(),
+                                (e ? e.__cxa_exception_type()->name() : "unknown"));
+                        _exec_env->fragment_mgr()->cancel(
+                                finst_id, doris::PPlanFragmentCancelReason::MEMORY_LIMIT_EXCEED,
+                                error_msg);
+                        if (rmc != nullptr) {
+                            rmc->Run();
+                            rmc = nullptr;
+                        }
+                        LOG(WARNING) << error_msg;
+                    }
+                },
+                [=, &rmc]() {
+                    if (temp_request->has_query_id()) {
+                        SCOPED_ATTACH_TASK_THREAD(
+                                ThreadContext::TaskType::QUERY, query_id, finst_id,
+                                _exec_env->task_pool_mem_tracker_registry()->get_task_mem_tracker(
+                                        query_id));
+                    }
+                    LOG(INFO) << "receive large data by stream, payload size "
+                              << temp_request->block().column_values().size();
+
+                    WARN_IF_ERROR(_exec_env->vstream_mgr()->transmit_block(temp_request, &rmc),
+                                  "transmit_block by stream failed");
+                    if (rmc != nullptr) {
+                        rmc->Run();
+                        rmc = nullptr;
+                    }
+                },
+                [=, &rmc]() {
+                    if (temp_request->has_query_id()) {
+                        SCOPED_ATTACH_TASK_THREAD(
+                                ThreadContext::TaskType::QUERY, query_id, finst_id,
+                                _exec_env->task_pool_mem_tracker_registry()->get_task_mem_tracker(
+                                        query_id));
+                    }
+                    LOG(WARNING) << "receive message from stream failed: query id is " << query_id;
+                    if (rmc != nullptr) {
+                        rmc->Run();
+                        rmc = nullptr;
+                    }
+                });
+    } else {
+        attachment_transfer_request_block<PTransmitDataParams>(request, cntl);
+        // The response is accessed when done->Run is called in transmit_block(),
+        // give response a default value to avoid null pointers in high concurrency.
+
+        st = _exec_env->vstream_mgr()->transmit_block(request, &done);
+        if (!st.ok()) {
+            LOG(WARNING) << "transmit_block failed, message=" << st.get_error_msg()
+                         << ", fragment_instance_id=" << print_id(request->finst_id())
+                         << ", node=" << request->node_id();
+        }
     }
     if (done != nullptr) {
         st.to_protobuf(response->mutable_status());

@@ -365,6 +365,7 @@ bool StringVal::resize(FunctionContext* ctx, int64_t new_len) {
         return true;
     }
     if (UNLIKELY(new_len > StringVal::MAX_LENGTH)) {
+        LOG(INFO) << "======= new_len > 1GB " << new_len;
         len = 0;
         is_null = true;
         return false;
@@ -394,6 +395,9 @@ StringVal StringVal::create_temp_string_val(FunctionContext* ctx, int64_t len) {
 
 void StringVal::append(FunctionContext* ctx, const uint8_t* buf, int64_t buf_len) {
     if (UNLIKELY(len + buf_len > StringVal::MAX_LENGTH)) {
+        LOG(INFO) << "======= Concatenated string length larger than allowed limit of "
+                     "1 GB character data.";
+
         ctx->set_error(
                 "Concatenated string length larger than allowed limit of "
                 "1 GB character data.");
@@ -411,6 +415,8 @@ void StringVal::append(FunctionContext* ctx, const uint8_t* buf, int64_t buf_len
 void StringVal::append(FunctionContext* ctx, const uint8_t* buf, int64_t buf_len,
                        const uint8_t* buf2, int64_t buf2_len) {
     if (UNLIKELY(len + buf_len + buf2_len > StringVal::MAX_LENGTH)) {
+        LOG(INFO) << "======= Concatenated string length larger than allowed limit of "
+                     "1 GB character data.";
         ctx->set_error(
                 "Concatenated string length larger than allowed limit of "
                 "1 GB character data.");

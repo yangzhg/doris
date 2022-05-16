@@ -17,18 +17,12 @@
 
 #include "util/stack_util.h"
 
-namespace google {
-namespace glog_internal_namespace_ {
-void DumpStackTraceToString(std::string* stacktrace);
-}
-} // namespace google
+#include <boost/stacktrace.hpp>
 
 namespace doris {
 
 std::string get_stack_trace() {
-    std::string s;
-    google::glog_internal_namespace_::DumpStackTraceToString(&s);
-    return s;
+    return boost::stacktrace::to_string(boost::stacktrace::stacktrace());
 }
 
 } // namespace doris

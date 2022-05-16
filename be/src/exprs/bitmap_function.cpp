@@ -17,6 +17,8 @@
 
 #include "exprs/bitmap_function.h"
 
+#include <boost/stacktrace.hpp>
+
 #include "exprs/anyval_util.h"
 #include "gutil/strings/numbers.h"
 #include "gutil/strings/split.h"
@@ -532,6 +534,10 @@ StringVal BitmapFunctions::bitmap_and(FunctionContext* ctx, const StringVal& lhs
     if (lhs.len == 0) {
         bitmap |= *reinterpret_cast<BitmapValue*>(lhs.ptr);
     } else {
+        LOG(INFO) << "========lhs.len:" << lhs.len;
+        if (lhs.len > (1 << 30) || lhs.len < 0) {
+            LOG(WARNING) << "=========" << boost::stacktrace::stacktrace();
+        }
         bitmap |= BitmapValue((char*)lhs.ptr);
     }
     for (int i = 0; i < num_args; ++i) {

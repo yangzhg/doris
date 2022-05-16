@@ -74,6 +74,8 @@ public:
         brpc::ChannelOptions options;
         if constexpr (std::is_same_v<T, PFunctionService_Stub>) {
             options.protocol = config::function_service_protocol;
+        } else {
+            options.protocol = brpc::PROTOCOL_BAIDU_STD;
         }
         std::unique_ptr<brpc::Channel> channel(new brpc::Channel());
         int ret_code = 0;
@@ -91,6 +93,25 @@ public:
         _stub_map.try_emplace_l(
                 host_port, [&stub](typename StubMap<T>::mapped_type& v) { stub = v; }, stub);
         return stub;
+    }
+
+    std::shared_ptr<T> get_new_client(const std::string& host_port, const std::string& protocol,
+                                      const std::string& connect_type) {
+        brpc::ChannelOptions options;
+        options.protocol = protocol;
+        options.connection_type = connect_type;
+        std::unique_ptr<brpc::Channel> channel(new brpc::Channel());
+        int ret_code = 0;
+        if (host_port.find("://") == std::string::npos) {
+            ret_code = channel->Init(host_port.c_str(), &options);
+        } else {
+            ret_code =
+                    channel->Init(host_port.c_str(), config::rpc_load_balancer.c_str(), &options);
+        }
+        if (ret_code) {
+            return nullptr;
+        }
+        return std::make_shared<T>(channel.release(), google::protobuf::Service::STUB_OWNS_CHANNEL);
     }
 
     size_t size() { return _stub_map.size(); }

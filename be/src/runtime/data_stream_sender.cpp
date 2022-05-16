@@ -47,6 +47,7 @@
 #include "util/brpc_client_cache.h"
 #include "util/debug_util.h"
 #include "util/defer_op.h"
+#include "util/md5.h"
 #include "util/network_util.h"
 #include "util/proto_util.h"
 #include "util/thrift_client.h"
@@ -84,6 +85,7 @@ DataStreamSender::Channel::~Channel() {
     }
     // release this before request desctruct
     _brpc_request.release_finst_id();
+    _brpc_request.release_query_id();
 }
 
 Status DataStreamSender::Channel::init(RuntimeState* state) {
@@ -103,6 +105,11 @@ Status DataStreamSender::Channel::init(RuntimeState* state) {
     _finst_id.set_hi(_fragment_instance_id.hi);
     _finst_id.set_lo(_fragment_instance_id.lo);
     _brpc_request.set_allocated_finst_id(&_finst_id);
+
+    _query_id.set_hi(state->query_id().hi);
+    _query_id.set_lo(state->query_id().lo);
+    _brpc_request.set_allocated_query_id(&_query_id);
+
     _brpc_request.set_node_id(_dest_node_id);
     _brpc_request.set_sender_id(_parent->_sender_id);
     _brpc_request.set_be_number(_be_number);
@@ -122,6 +129,8 @@ Status DataStreamSender::Channel::init(RuntimeState* state) {
             return Status::InternalError(msg);
         }
     }
+    _state = state;
+
     return Status::OK();
 }
 
@@ -148,18 +157,100 @@ Status DataStreamSender::Channel::send_batch(PRowBatch* batch, bool eos) {
 
     _closure->ref();
     _closure->cntl.set_timeout_ms(_brpc_timeout_ms);
-
+    std::string temp_data;
+    bool by_stream = false;
+    constexpr size_t max_size = 1 << 30; // 1GB
     if (_parent->_transfer_data_by_brpc_attachment && _brpc_request.has_row_batch()) {
-        request_row_batch_transfer_attachment<PTransmitDataParams,
-                                              RefCountClosure<PTransmitDataResult>>(
-                &_brpc_request, _parent->_tuple_data_buffer, _closure);
+        if (_parent->_tuple_data_buffer.size() < max_size) {
+            request_row_batch_transfer_attachment<PTransmitDataParams,
+                                                  RefCountClosure<PTransmitDataResult>>(
+                    &_brpc_request, _parent->_tuple_data_buffer, _closure);
+        } else {
+            temp_data = std::move(_parent->_tuple_data_buffer);
+            _parent->_tuple_data_buffer.clear();
+            by_stream = true;
+        }
+    } else if (_brpc_request.has_row_batch() &&
+               _brpc_request.row_batch().tuple_data().size() >= max_size) {
+        temp_data = std::move(*(_brpc_request.mutable_row_batch()->mutable_tuple_data()));
+        _brpc_request.mutable_row_batch()->set_tuple_data("");
+        by_stream = true;
     }
-    _brpc_stub->transmit_data(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
+    if (UNLIKELY(by_stream)) {
+        // because of stream rpc is a async call, the first call just open a stream.
+        // the following calls will send data throuht the stream,  so we cannot use
+        // controller in _closure, this will casuse rpc join after stream is created
+        // and data is not send to server
+        brpc::Controller cntl;
+        brpc::StreamId sd = brpc::INVALID_STREAM_ID;
+        PTransmitDataResult response;
+        cntl.set_timeout_ms(_brpc_timeout_ms);
+        Defer close_sd {[&sd, this]() {
+            if (sd != brpc::INVALID_STREAM_ID) {
+                brpc::StreamClose(sd);
+            }
+            brpc::StartCancel(_closure->cntl.call_id());
+            _closure->Run();
+        }};
+        if (brpc::StreamCreate(&sd, cntl, nullptr) != 0) {
+            LOG(ERROR) << "Fail to create stream";
+            return Status::InternalError("Fail to create stream");
+        }
+        if (_brpc_request.has_row_batch()) {
+            _brpc_request.mutable_row_batch()->set_tuple_data("");
+        }
+        std::string host_port =
+                fmt::format("{}:{}", _brpc_dest_addr.hostname, _brpc_dest_addr.port);
+        auto brpc_stream_stub = _state->exec_env()->brpc_internal_client_cache()->get_new_client(
+                host_port, "baidu_std", "pooled");
+        if (!brpc_stream_stub) {
+            std::string msg = fmt::format("Get rpc stub failed, dest_addr={}", host_port);
+            LOG(WARNING) << msg;
+            return Status::InternalError(msg);
+        }
+        Md5Digest digest;
+        digest.update(temp_data.c_str(), temp_data.size());
+        digest.digest();
+        LOG(INFO) << "send large data by stream, payload size " << temp_data.size() << ", to "
+                  << host_port << ", md5: " << digest.hex();
+        ;
+        brpc_stream_stub->transmit_data(&cntl, &_brpc_request, &response, NULL);
+        constexpr size_t buffer_size = 100 * 1024 * 1024;
+        size_t cur_pos = 0;
+        butil::IOBuf payload;
+        do {
+            if (UNLIKELY(_state->is_cancelled())) {
+                return Status::Cancelled("Cancelled may be transmit data too large");
+            }
+            payload.clear();
+            payload.append(temp_data.data() + cur_pos,
+                           std::min(temp_data.size() - cur_pos, buffer_size));
+            int ret = brpc::StreamWrite(sd, payload);
+            if (ret != 0) {
+                RETURN_NOT_OK_STATUS_WITH_WARN(
+                        Status::InternalError(fmt::format(
+                                "Fail to write to stream, stream id: {} , return: {}[{}]", sd,
+                                std::strerror(ret), ret)),
+                        "StreamWrite failed");
+            }
+            ret = brpc::StreamWait(sd, nullptr);
+            if (ret != 0) {
+                RETURN_NOT_OK_STATUS_WITH_WARN(
+                        Status::InternalError(fmt::format(
+                                "Fail to wait stream write, stream id: {} , return: {}[{}]", sd,
+                                std::strerror(ret), ret)),
+                        "StreamWait failed");
+            }
+            cur_pos += payload.size();
+        } while (cur_pos < temp_data.size());
+    } else {
+        _brpc_stub->transmit_data(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
+    }
     if (batch != nullptr) {
         _brpc_request.release_row_batch();
     }
     return Status::OK();
-}
+} // namespace doris
 
 Status DataStreamSender::Channel::add_row(TupleRow* row) {
     if (_fragment_instance_id.lo == -1) {

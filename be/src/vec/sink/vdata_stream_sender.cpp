@@ -28,6 +28,7 @@
 #include "runtime/mem_tracker.h"
 #include "runtime/runtime_state.h"
 #include "runtime/thread_context.h"
+#include "util/defer_op.h"
 #include "util/proto_util.h"
 #include "vec/common/sip_hash.h"
 #include "vec/runtime/vdata_stream_mgr.h"
@@ -51,6 +52,11 @@ Status VDataStreamSender::Channel::init(RuntimeState* state) {
     _finst_id.set_hi(_fragment_instance_id.hi);
     _finst_id.set_lo(_fragment_instance_id.lo);
     _brpc_request.set_allocated_finst_id(&_finst_id);
+
+    _query_id.set_hi(state->query_id().hi);
+    _query_id.set_lo(state->query_id().lo);
+    _brpc_request.set_allocated_query_id(&_query_id);
+
     _brpc_request.set_node_id(_dest_node_id);
     _brpc_request.set_sender_id(_parent->_sender_id);
     _brpc_request.set_be_number(_be_number);
@@ -68,6 +74,7 @@ Status VDataStreamSender::Channel::init(RuntimeState* state) {
     // to build a camouflaged empty channel. the ip and port is '0.0.0.0:0"
     // so the empty channel not need call function close_internal()
     _need_close = (_fragment_instance_id.hi != -1 && _fragment_instance_id.lo != -1);
+    _state = state;
     return Status::OK();
 }
 
@@ -137,14 +144,77 @@ Status VDataStreamSender::Channel::send_block(PBlock* block, bool eos) {
 
     _closure->ref();
     _closure->cntl.set_timeout_ms(_brpc_timeout_ms);
+    std::string temp_data;
+    bool by_stream = false;
 
+    constexpr size_t max_size = 1 << 30; // 1GB
     if (_brpc_request.has_block()) {
-        request_block_transfer_attachment<PTransmitDataParams,
-                                          RefCountClosure<PTransmitDataResult>>(
-                &_brpc_request, _parent->_column_values_buffer, _closure);
+        if (_parent->_column_values_buffer.size() < max_size) {
+            request_block_transfer_attachment<PTransmitDataParams,
+                                              RefCountClosure<PTransmitDataResult>>(
+                    &_brpc_request, _parent->_column_values_buffer, _closure);
+        } else {
+            temp_data.swap(_parent->_column_values_buffer);
+            _parent->_column_values_buffer.clear();
+            by_stream = true;
+        }
     }
+    if (UNLIKELY(by_stream)) {
+        brpc::StreamId sd = brpc::INVALID_STREAM_ID;
+        brpc::Controller cntl;
+        cntl.set_timeout_ms(_brpc_timeout_ms);
+        PTransmitDataResult response;
+        Defer close_sd {[&sd, this]() {
+            if (sd != brpc::INVALID_STREAM_ID) {
+                brpc::StreamClose(sd);
+            }
+            brpc::StartCancel(_closure->cntl.call_id());
+            _closure->Run();
+        }};
+        if (brpc::StreamCreate(&sd, cntl, nullptr) != 0) {
+            LOG(ERROR) << "Fail to create stream";
+            return Status::InternalError("Fail to create stream");
+        }
+        std::string host_port =
+                fmt::format("{}:{}", _brpc_dest_addr.hostname, _brpc_dest_addr.port);
+        auto brpc_stream_stub = _state->exec_env()->brpc_internal_client_cache()->get_new_client(
+                host_port, "baidu_std", "pooled");
+        if (!brpc_stream_stub) {
+            std::string msg = fmt::format("Get rpc stub failed, dest_addr={}", host_port);
+            LOG(WARNING) << msg;
+            return Status::InternalError(msg);
+        }
+        brpc_stream_stub->transmit_block(&cntl, &_brpc_request, &response, NULL);
 
-    _brpc_stub->transmit_block(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
+        constexpr size_t buffer_size = 100 * 1024 * 1024;
+        size_t cur_pos = 0;
+        butil::IOBuf payload;
+        do {
+            RETURN_IF_CANCELLED(_state);
+            payload.clear();
+            payload.append(temp_data.data() + cur_pos,
+                           std::min(temp_data.size() - cur_pos, buffer_size));
+            int ret = brpc::StreamWrite(sd, payload);
+            if (ret != 0) {
+                RETURN_NOT_OK_STATUS_WITH_WARN(
+                        Status::InternalError(fmt::format(
+                                "Fail to write to stream, stream id: {} , return: {}[{}]", sd,
+                                std::strerror(ret), ret)),
+                        "StreamWrite failed");
+            }
+            ret = brpc::StreamWait(sd, nullptr);
+            if (ret != 0) {
+                RETURN_NOT_OK_STATUS_WITH_WARN(
+                        Status::InternalError(fmt::format(
+                                "Fail to wait stream write, stream id: {} , return: {}[{}]", sd,
+                                std::strerror(ret), ret)),
+                        "StreamWait failed");
+            }
+            cur_pos += payload.size();
+        } while (cur_pos < temp_data.size());
+    } else {
+        _brpc_stub->transmit_block(&_closure->cntl, &_brpc_request, &_closure->result, _closure);
+    }
     if (block != nullptr) {
         _brpc_request.release_block();
     }

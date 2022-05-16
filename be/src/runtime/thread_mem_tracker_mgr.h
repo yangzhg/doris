@@ -137,6 +137,8 @@ public:
                 fmt::to_string(mem_tracker_labels_buf));
     }
 
+    std::string& task_id() { return _task_id; }
+
 private:
     // If tryConsume fails due to task mem tracker exceeding the limit, the task must be canceled
     void exceeded_cancel_task(const std::string& cancel_details);
