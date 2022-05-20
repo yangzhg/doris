@@ -343,16 +343,6 @@ Status OutStream::write_to_file(FileHandler* file_handle, uint32_t write_mbytes_
     for (std::vector<StorageByteBuffer*>::const_iterator it = _output_buffers.begin();
          it != _output_buffers.end(); ++it) {
         VLOG_TRACE << "write stream begin:" << file_handle->tell();
-
-        res = file_handle->write((*it)->array(), (*it)->limit());
-        if (!res.ok()) {
-            LOG(WARNING) << "fail to write stream to fail.";
-            return res;
-        }
-
-        VLOG_TRACE << "write stream end:" << file_handle->tell();
-
-        total_stream_len += (*it)->limit();
         if (write_mbytes_per_sec > 0) {
             uint64_t delta_time_us = speed_limit_watch.get_elapse_time_us();
             int64_t sleep_time = total_stream_len / write_mbytes_per_sec - delta_time_us;
@@ -362,6 +352,15 @@ Status OutStream::write_to_file(FileHandler* file_handle, uint32_t write_mbytes_
                 std::this_thread::sleep_for(std::chrono::microseconds(sleep_time));
             }
         }
+        res = file_handle->write((*it)->array(), (*it)->limit());
+        if (!res.ok()) {
+            LOG(WARNING) << "fail to write stream to fail.";
+            return res;
+        }
+
+        VLOG_TRACE << "write stream end:" << file_handle->tell();
+
+        total_stream_len += (*it)->limit();
     }
 
     return res;

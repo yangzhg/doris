@@ -189,8 +189,21 @@ Status VDataStreamSender::Channel::send_block(PBlock* block, bool eos) {
         constexpr size_t buffer_size = 100 * 1024 * 1024;
         size_t cur_pos = 0;
         butil::IOBuf payload;
+        OlapStopWatch speed_limit_watch;
+        speed_limit_watch.reset();
+        int limit = config::large_rowbatch_transmit_mbytes_per_sec;
         do {
             RETURN_IF_CANCELLED(_state);
+            // limit upload speed
+            if (limit > 0) {
+                uint64_t delta_time_us = speed_limit_watch.get_elapse_time_us();
+                int64_t sleep_time = cur_pos / limit - delta_time_us;
+                if (sleep_time > 0) {
+                    VLOG_TRACE << "sleep to limit merge speed. time=" << sleep_time
+                               << ", bytes=" << cur_pos;
+                    std::this_thread::sleep_for(std::chrono::microseconds(sleep_time));
+                }
+            }
             payload.clear();
             payload.append(temp_data.data() + cur_pos,
                            std::min(temp_data.size() - cur_pos, buffer_size));

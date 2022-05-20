@@ -47,7 +47,6 @@
 #include "util/brpc_client_cache.h"
 #include "util/debug_util.h"
 #include "util/defer_op.h"
-#include "util/md5.h"
 #include "util/network_util.h"
 #include "util/proto_util.h"
 #include "util/thrift_client.h"
@@ -159,7 +158,9 @@ Status DataStreamSender::Channel::send_batch(PRowBatch* batch, bool eos) {
     _closure->cntl.set_timeout_ms(_brpc_timeout_ms);
     std::string temp_data;
     bool by_stream = false;
-    constexpr size_t max_size = 1 << 30; // 1GB
+    // constexpr size_t max_size = 1 << 30; // 1GB
+    constexpr size_t max_size = 0; // 1GB
+
     if (_parent->_transfer_data_by_brpc_attachment && _brpc_request.has_row_batch()) {
         if (_parent->_tuple_data_buffer.size() < max_size) {
             request_row_batch_transfer_attachment<PTransmitDataParams,
@@ -191,6 +192,7 @@ Status DataStreamSender::Channel::send_batch(PRowBatch* batch, bool eos) {
             }
             brpc::StartCancel(_closure->cntl.call_id());
             _closure->Run();
+            LOG(INFO) << "=====================next";
         }};
         if (brpc::StreamCreate(&sd, cntl, nullptr) != 0) {
             LOG(ERROR) << "Fail to create stream";
@@ -208,24 +210,36 @@ Status DataStreamSender::Channel::send_batch(PRowBatch* batch, bool eos) {
             LOG(WARNING) << msg;
             return Status::InternalError(msg);
         }
-        Md5Digest digest;
-        digest.update(temp_data.c_str(), temp_data.size());
-        digest.digest();
-        LOG(INFO) << "send large data by stream, payload size " << temp_data.size() << ", to "
-                  << host_port << ", md5: " << digest.hex();
-        ;
         brpc_stream_stub->transmit_data(&cntl, &_brpc_request, &response, NULL);
         constexpr size_t buffer_size = 100 * 1024 * 1024;
         size_t cur_pos = 0;
         butil::IOBuf payload;
+
+        OlapStopWatch speed_limit_watch;
+        speed_limit_watch.reset();
+        // int limit = config::large_rowbatch_transmit_mbytes_per_sec;
+        int limit = 1 << 20;
+
         do {
             if (UNLIKELY(_state->is_cancelled())) {
                 return Status::Cancelled("Cancelled may be transmit data too large");
             }
+            // limit upload speed
+            if (limit > 0) {
+                uint64_t delta_time_us = speed_limit_watch.get_elapse_time_us();
+                int64_t sleep_time = cur_pos / limit - delta_time_us;
+                if (sleep_time > 0) {
+                    LOG(INFO) << "sleep to limit merge speed. time=" << sleep_time
+                              << ", bytes=" << cur_pos;
+                    std::this_thread::sleep_for(std::chrono::microseconds(sleep_time));
+                }
+            }
             payload.clear();
             payload.append(temp_data.data() + cur_pos,
                            std::min(temp_data.size() - cur_pos, buffer_size));
+
             int ret = brpc::StreamWrite(sd, payload);
+            LOG(INFO) << "====== sending " << payload.size();
             if (ret != 0) {
                 RETURN_NOT_OK_STATUS_WITH_WARN(
                         Status::InternalError(fmt::format(
@@ -234,6 +248,7 @@ Status DataStreamSender::Channel::send_batch(PRowBatch* batch, bool eos) {
                         "StreamWrite failed");
             }
             ret = brpc::StreamWait(sd, nullptr);
+            LOG(INFO) << "====== sending done";
             if (ret != 0) {
                 RETURN_NOT_OK_STATUS_WITH_WARN(
                         Status::InternalError(fmt::format(

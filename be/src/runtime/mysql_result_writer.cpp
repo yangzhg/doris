@@ -237,7 +237,6 @@ Status MysqlResultWriter::append_row_batch(const RowBatch* batch) {
     // convert one batch
     std::unique_ptr<TFetchDataResult> result = std::make_unique<TFetchDataResult>();
     int num_rows = batch->num_rows();
-    LOG(INFO) << "===========batch->num_rows() " << num_rows;
     result->result_batch.rows.resize(num_rows);
 
     {
@@ -250,7 +249,6 @@ Status MysqlResultWriter::append_row_batch(const RowBatch* batch) {
             if (status.ok()) {
                 result->result_batch.rows[i].assign(_row_buffer->buf(), _row_buffer->length());
                 l += _row_buffer->length();
-                LOG(WARNING) << "==============TFetchDataResult size " << l;
             } else {
                 LOG(WARNING) << "convert row to mysql result failed.";
                 break;

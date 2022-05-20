@@ -186,17 +186,17 @@ void PInternalServiceImpl::transmit_data(google::protobuf::RpcController* cntl_b
         }
         auto temp_request = new PTransmitDataParams();
         temp_request->CopyFrom(*request);
-        google::protobuf::Closure* rmc = new ReleaseMemClosure<PTransmitDataParams>(temp_request);
         _transmit_receiver->add_stream(
                 sd,
                 // on_received_messages
-                [=, &rmc](butil::IOBuf* msg) {
+                [=](butil::IOBuf* msg) {
                     if (temp_request->has_query_id()) {
                         SCOPED_ATTACH_TASK_THREAD(
                                 ThreadContext::TaskType::QUERY, query_id, finst_id,
                                 _exec_env->task_pool_mem_tracker_registry()->get_task_mem_tracker(
                                         query_id));
                     }
+                    LOG(INFO) << "====== received " << msg->size();
                     auto rb = temp_request->mutable_row_batch();
                     try {
                         msg->append_to(rb->mutable_tuple_data(), msg->size());
@@ -210,37 +210,32 @@ void PInternalServiceImpl::transmit_data(google::protobuf::RpcController* cntl_b
                         _exec_env->fragment_mgr()->cancel(
                                 finst_id, doris::PPlanFragmentCancelReason::MEMORY_LIMIT_EXCEED,
                                 error_msg);
-                        if (rmc != nullptr) {
-                            rmc->Run();
-                            rmc = nullptr;
-                        }
+                        delete temp_request;
                         LOG(WARNING) << error_msg;
                     }
                 },
                 // on_close
-                [=, &rmc]() {
+                [=]() {
                     if (temp_request->has_query_id()) {
                         SCOPED_ATTACH_TASK_THREAD(
                                 ThreadContext::TaskType::QUERY, query_id, finst_id,
                                 _exec_env->task_pool_mem_tracker_registry()->get_task_mem_tracker(
                                         query_id));
                     }
-                    Md5Digest digest;
-                    digest.update(temp_request->row_batch().tuple_data().c_str(),
-                                  temp_request->row_batch().tuple_data().size());
-                    digest.digest();
-                    LOG(INFO) << "receive large data by stream, payload size "
-                              << temp_request->row_batch().tuple_data().size()
-                              << ", md5: " << digest.hex();
+                    google::protobuf::Closure* rmc =
+                            new ReleaseMemClosure<PTransmitDataParams>(temp_request);
                     WARN_IF_ERROR(_exec_env->stream_mgr()->transmit_data(temp_request, &rmc),
                                   "transmit_data by stream failed");
+                    LOG(INFO) << "====== temp_request->eos(): " << temp_request->eos()
+                              << ", rmc == nullptr: " << (rmc == nullptr) << " , "
+                              << static_cast<void*>(rmc);
                     if (rmc != nullptr) {
                         rmc->Run();
                         rmc = nullptr;
                     }
                 },
                 // on_idle_timeout
-                [=, &rmc]() {
+                [=]() {
                     if (temp_request->has_query_id()) {
                         SCOPED_ATTACH_TASK_THREAD(
                                 ThreadContext::TaskType::QUERY, query_id, finst_id,
@@ -248,10 +243,7 @@ void PInternalServiceImpl::transmit_data(google::protobuf::RpcController* cntl_b
                                         query_id));
                     }
                     LOG(WARNING) << "receive message from stream failed: query id is " << query_id;
-                    if (rmc != nullptr) {
-                        rmc->Run();
-                        rmc = nullptr;
-                    }
+                    delete temp_request;
                 });
     } else {
         attachment_transfer_request_row_batch<PTransmitDataParams>(request, cntl);

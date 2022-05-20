@@ -135,6 +135,9 @@ Status DataStreamMgr::transmit_data(const PTransmitDataParams* request,
 
     bool eos = request->eos();
     if (request->has_row_batch()) {
+        LOG(INFO) << "====== request->eos(): " << request->eos()
+                  << ", *done == nullptr: " << (*done == nullptr) << " , "
+                  << static_cast<void*>(*done);
         recvr->add_batch(request->row_batch(), request->sender_id(), request->be_number(),
                          request->packet_seq(), eos ? nullptr : done);
     }

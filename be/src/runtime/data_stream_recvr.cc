@@ -266,6 +266,8 @@ void DataStreamRecvr::SenderQueue::add_batch(const PRowBatch& pb_batch, int be_n
         DCHECK(*done != nullptr);
         _pending_closures.emplace_back(*done, monotonicStopWatch);
         *done = nullptr;
+        LOG(INFO) << "============ *done == nullptr: " << (*done == nullptr) << " , "
+                  << static_cast<void*>(*done);
     }
     _recvr->_num_buffered_bytes += batch_size;
     _data_arrival_cv.notify_one();
