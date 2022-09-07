@@ -178,6 +178,10 @@ public abstract class LoadScanNode extends ScanNode {
                         }
                     }
                 }
+            } else {
+                if (expr.isNullable() && Config.enable_vectorized_load) {
+                    destSlotDesc.setIsNullable(true);
+                }
             }
 
             // check hll_hash

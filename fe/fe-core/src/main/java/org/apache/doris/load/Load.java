@@ -955,7 +955,7 @@ public class Load {
             } else {
                 SlotDescriptor slotDesc = analyzer.getDescTbl().addSlotDescriptor(srcTupleDesc);
                 // only support parquet format now
-                if (useVectorizedLoad  && formatType == TFileFormatType.FORMAT_PARQUET
+                if (useVectorizedLoad && formatType == TFileFormatType.FORMAT_PARQUET
                         && tblColumn != null) {
                     // in vectorized load
                     // example: k1 is DATETIME in source file, and INT in schema, mapping exper is k1=year(k1)
